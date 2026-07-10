@@ -25,10 +25,10 @@
 
 // yo soy chad lo pongo como define en vez de un .bat cual hay!!
 #define PS2_ENABLE_PSMT8 1
-// ---- Matrix stack ----
 
-typedef float Mat4[16]; // column-major, OpenGL convention
+typedef float Mat4[16]; 
 
+// chupamela
 static void m4_identity(Mat4 m) {
     m[0]=1;m[1]=0;m[2]=0;m[3]=0;
     m[4]=0;m[5]=1;m[6]=0;m[7]=0;
@@ -38,7 +38,7 @@ static void m4_identity(Mat4 m) {
 static void m4_copy(Mat4 dst, const Mat4 src) {
     memcpy(dst, src, 16*sizeof(float));
 }
-// out = a * b  (column-major)
+// columna-major matrix multiplication: out = a*b
 static void m4_mul(Mat4 out, const Mat4 a, const Mat4 b) {
     for (int c = 0; c < 4; c++)
         for (int r = 0; r < 4; r++) {

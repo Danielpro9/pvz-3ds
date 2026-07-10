@@ -13,6 +13,24 @@
 #include "../../Sexy.TodLib/EffectSystem.h"
 #include "../../Sexy.TodLib/TodStringFile.h"
 
+#ifdef PS2_PLATFORM
+// Park the audio mixer around the credits' main-thread file I/O (see
+// Reanimator.cpp for the rationale). The credits load is the heaviest fio
+// burst outside the loading thread — 7 TodLoadResources groups + ~35 reanims —
+// and StopAllMusic silences the tune but not the mixer thread, so its audsrv
+// SIF RPCs keep racing the reads and wedge the IOP on real hardware.
+namespace Sexy { void Ps2MixerIoPauseBegin(); void Ps2MixerIoPauseEnd(); }
+namespace {
+	struct Ps2CreditsIoPause {
+		Ps2CreditsIoPause()  { Sexy::Ps2MixerIoPauseBegin(); }
+		~Ps2CreditsIoPause() { Sexy::Ps2MixerIoPauseEnd(); }
+	};
+}
+#define PS2_PAUSE_MIXER_FOR_IO() Ps2CreditsIoPause aPs2CreditsIoPause_
+#else
+#define PS2_PAUSE_MIXER_FOR_IO() ((void)0)
+#endif
+
 static CreditsTiming gCreditsTiming[] = {  //0x6A1AD8
     {  128.5f,      CreditWordType::WORD_AW ,         0,     CreditBrainType::BRAIN_OFF       },
     {  133.0f,      CreditWordType::WORD_OH ,         0,     CreditBrainType::BRAIN_OFF       },
@@ -315,7 +333,11 @@ CreditScreen::CreditScreen(LawnApp* theApp)
 
 	mApp->mEffectSystem->EffectSystemFreeAll();
 	mApp->mMusic->StopAllMusic();
-	TodLoadResources("DelayLoad_Credits");
+	{
+		// Main-thread fio with the mixer thread still issuing audsrv RPCs.
+		PS2_PAUSE_MIXER_FOR_IO();
+		TodLoadResources("DelayLoad_Credits");
+	}
 
     mBrainPosX = 0.0f;
     mBrainPosY = 0.0f;
@@ -378,6 +400,22 @@ void CreditScreen::RemovedFromManager(WidgetManager* theWidgetManager)
 void CreditScreen::PreLoadCredits()
 {
     mPreloaded = true;
+#ifdef LOW_MEMORY
+	// The credits load is the heaviest in the game — 6 full backgrounds plus
+	// ~35 reanim atlases, all held resident at once — and can exhaust the
+	// ~26 MB heap ("freezes completely while loading"). The board is already
+	// torn down (EffectSystemFreeAll ran in the ctor), so free everything
+	// reclaimable first to give the load maximum headroom; it reloads on demand.
+	mApp->PurgeUnusedAssets();
+	if (mApp->mSoundManager != nullptr)
+		mApp->mSoundManager->PurgeSounds();
+	mApp->PurgeLazyImageBits(true);
+#endif
+	// One mixer park for the whole burst: the 7 TodLoadResources groups and
+	// every reanim load below are main-thread fio racing the live mixer's audsrv
+	// SIF RPCs (StopAllMusic silenced the tune, not the mixer thread) — the IOP
+	// wedge that freezes real hardware. Nested reanim parks re-enter cheaply.
+	PS2_PAUSE_MIXER_FOR_IO();
 	mLoadedResourceNames.push_back("DelayLoad_Background1");
 	mLoadedResourceNames.push_back("DelayLoad_Background2");
 	mLoadedResourceNames.push_back("DelayLoad_Background3");

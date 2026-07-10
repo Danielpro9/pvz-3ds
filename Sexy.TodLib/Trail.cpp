@@ -273,7 +273,10 @@ void Trail::Draw(Graphics* g)
 
 void TrailHolder::InitializeHolder()
 {
-	mTrails.DataArrayInitialize(1024U, "trails");
+	// 2048, not 1024: AllocTrail is unguarded and exit(0)s when the pool fills
+	// (see ReanimationHolder::InitializeHolder). Projectile/effect trails climb
+	// with a heavy horde. Small item; cheap to grow.
+	mTrails.DataArrayInitialize(2048U, "trails");
 }
 
 //0x4455A0

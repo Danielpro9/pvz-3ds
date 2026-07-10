@@ -26,6 +26,22 @@
 #include "misc/PerfTimer.h"
 #include "widget/WidgetManager.h"
 
+#ifdef PS2_PLATFORM
+// See Reanimator.cpp for the rationale: park the audio mixer around main-thread
+// file I/O so its audsrv SIF RPCs don't collide with the reads and wedge the
+// IOP on real hardware. One park wraps the whole per-level preload burst below.
+namespace Sexy { void Ps2MixerIoPauseBegin(); void Ps2MixerIoPauseEnd(); }
+namespace {
+	struct Ps2CutSceneIoPause {
+		Ps2CutSceneIoPause()  { Sexy::Ps2MixerIoPauseBegin(); }
+		~Ps2CutSceneIoPause() { Sexy::Ps2MixerIoPauseEnd(); }
+	};
+}
+#define PS2_PAUSE_MIXER_FOR_IO() Ps2CutSceneIoPause aPs2CutSceneIoPause_
+#else
+#define PS2_PAUSE_MIXER_FOR_IO() ((void)0)
+#endif
+
 static const int	TimePanRightStart				= 1500;
 static const int	TimePanRightEnd					= 3500;		//[0x6A4FFC]
 static const int	TimeEarlyDaveEnterStart			= 2000;		//[0x6A5000]
@@ -358,6 +374,12 @@ void CutScene::PreloadResources()
 		return;
 	}
 	mPreloaded = true;
+
+	// One park for the whole per-level preload: it reads every level plant/zombie
+	// reanim + images on the main thread while the selector music is live. Nested
+	// reanim loads re-enter the park cheaply (it stays raised throughout), so
+	// there is no park thrash. Without it each first-use fio can wedge the IOP.
+	PS2_PAUSE_MIXER_FOR_IO();
 
 	mLoadedResourceNames.clear();
 

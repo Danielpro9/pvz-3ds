@@ -1801,6 +1801,19 @@ void Board::UpdateLevelEndSequence()
 		if (mNextSurvivalStageCounter == 1 && mApp->IsSurvivalMode())
 		{
 			TryToSaveGame();
+#ifdef LOW_MEMORY
+			// Endless survival never disposes the board, so reanim/image/PCM for
+			// zombie types that have come and gone pile up toward the ~26 MB
+			// ceiling with no screen transition to purge at — the eventual OOM
+			// is the "crashes after a long run" symptom. Drop what nothing alive
+			// uses at each stage boundary (zombies from the cleared stage are
+			// gone by now). Both calls self-gate on heap pressure via
+			// ShouldPurgeAssets, so they are no-ops until we approach the ceiling,
+			// and anything purged reloads transparently (now mixer-parked) later.
+			mApp->PurgeUnusedAssets();
+			if (mApp->mSoundManager != nullptr && mApp->ShouldPurgeAssets())
+				mApp->mSoundManager->PurgeSounds();
+#endif
 		}
 
 		if (!mNextSurvivalStageCounter)

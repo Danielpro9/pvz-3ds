@@ -13,6 +13,25 @@
 #include <set>
 #include <vector>
 
+#ifdef PS2_PLATFORM
+// Park the audio mixer around reanim file I/O. On PS2 the mixer thread issues
+// audsrv SIF RPCs continuously; a reanim's compiled file plus its PNGs are read
+// on the main thread — and with LOW_MEMORY there is no preload, so this fires
+// the first time each plant/zombie/effect appears mid-game (Plant::Startup,
+// board effects, save load). An overlapping fio wedges the shared IOP on real
+// hardware. Forward-declared to avoid pulling the PS2 sound header in here.
+namespace Sexy { void Ps2MixerIoPauseBegin(); void Ps2MixerIoPauseEnd(); }
+namespace {
+	struct Ps2ReanimIoPause {
+		Ps2ReanimIoPause()  { Sexy::Ps2MixerIoPauseBegin(); }
+		~Ps2ReanimIoPause() { Sexy::Ps2MixerIoPauseEnd(); }
+	};
+}
+#define PS2_PAUSE_MIXER_FOR_IO() Ps2ReanimIoPause aPs2ReanimIoPause_
+#else
+#define PS2_PAUSE_MIXER_FOR_IO() ((void)0)
+#endif
+
 unsigned int gReanimatorDefCount;                     //[0x6A9EE4]
 ReanimatorDefinition* gReanimatorDefArray;   //[0x6A9EE8]
 unsigned int gReanimationParamArraySize;              //[0x6A9EEC]
@@ -1123,7 +1142,17 @@ ReanimationHolder::~ReanimationHolder()
 
 void ReanimationHolder::InitializeHolder()
 {
-	mReanimations.DataArrayInitialize(1024U, "reanims");
+	// 2048, not 1024: AllocReanimation is UNGUARDED — when the pool fills it hits
+	// TOD_ASSERT(mSize != mMaxSize), and a failed assert runs exit(0) (see
+	// TodAssertFailed), so the game just closes ("crash after a heavy wave"). A
+	// dense horde of accessorized zombies blows past 1024: every zombie body,
+	// every accessory (cone/bucket/door/flag = an Attachment carrying its own
+	// reanim), every plant, animated projectile and death effect is one
+	// reanimation. Particles/emitters degrade gracefully (they null-check the
+	// pool); reanimations cannot (callers deref the result), so grow the pool.
+	// The DataArray item is small (~150 B); the live cost is per-reanim track
+	// instances allocated on demand, unchanged by the cap.
+	mReanimations.DataArrayInitialize(2048U, "reanims");
 }
 
 //0x473590
@@ -1144,6 +1173,11 @@ void ReanimatorEnsureDefinitionLoaded(ReanimationType theReanimType, bool theIsP
 	ReanimatorDefinition* aReanimDef = &gReanimatorDefArray[(int)theReanimType];
 	if (aReanimDef->mTracks.tracks != nullptr)  // 如果轨道指针不为空指针，说明定义数据已经加载
 		return;
+	// Real load ahead (file + PNGs). Park the mixer so its audsrv SIF RPCs can't
+	// collide with these reads on real hardware. Placed AFTER the already-loaded
+	// early-out so the common no-op case never parks. Nests cheaply under the
+	// loading thread's park and under CutScene::PreloadResources.
+	PS2_PAUSE_MIXER_FOR_IO();
 	ReanimationParams* aReanimParams = &gReanimationParamArray[(int)theReanimType];
 	TodTrace("'%s'\n", aReanimParams->mReanimFileName);
 	if (theIsPreloading)

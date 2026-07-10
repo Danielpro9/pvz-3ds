@@ -2074,8 +2074,18 @@ bool SexyAppBase::WriteBytesToFile(const std::string& theFileName, const void *t
 			return false;
 
 		return true;
-	}	
+	}
 
+#ifdef PS2_PLATFORM
+	// Park the audio mixer for the write. fcaseopen+fwrite below are fio SIF
+	// RPCs on the main thread; a save at a survival-stage boundary
+	// (Board::TryToSaveGame) or a profile write (PlayerInfo::SaveDetails) runs
+	// while the mixer is streaming audsrv RPCs, and an overlapping fio wedges
+	// the shared IOP on real hardware (silent freeze; PCSX2 serializes SIF so it
+	// never reproduces). Mirrors the loading thread's whole-load park. Placed
+	// after the demo-playback early-out so no-write paths never park.
+	Ps2MixerIoPauseScope aMixerPause;
+#endif
 	MkDir(GetFileDir(theFileName));
 	FILE* aFP = fcaseopen(theFileName.c_str(), "w+b");
 
@@ -5537,6 +5547,15 @@ Sexy::GLImage* SexyAppBase::GetImage(const std::string& theFileName, bool commit
 // neither the pak reader nor SIF RPC is thread-safe. The lock is recursive.
 bool SexyAppBase::LoadLazyImageBits(MemoryImage* theImage)
 {
+#ifdef PS2_PLATFORM
+	// Park the audio mixer for the whole decode. ImageLib::GetImage below reads
+	// the image file (fio SIF RPCs) on the main render thread while the mixer
+	// streams audsrv RPCs; overlapping them wedges the shared IOP on real
+	// hardware. This fault-in fires mid-game (first draw of any not-yet-decoded
+	// image), so it must park the same way the loading thread does. Taken before
+	// the locks below so its bounded park-handshake wait holds no lock.
+	Ps2MixerIoPauseScope aMixerPause;
+#endif
 	// Before pulling more pixels in, shed other images' decoded bits if the
 	// heap is close to the ceiling. Must run before taking Ps2IoLock: the
 	// purge takes mCritSect then Ps2IoLock, and taking them in the opposite

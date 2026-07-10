@@ -599,7 +599,11 @@ AttachmentHolder::~AttachmentHolder()
 
 void AttachmentHolder::InitializeHolder()
 {
-	mAttachments.DataArrayInitialize(1024U, "attachments");
+	// 2048, not 1024: AllocAttachment is unguarded and exit(0)s when the pool
+	// fills (see ReanimationHolder::InitializeHolder). Every accessorized zombie
+	// in a dense horde carries an Attachment (cone/bucket/screen door/flag/...),
+	// so this pool climbs with the reanimation pool. Small item; cheap to grow.
+	mAttachments.DataArrayInitialize(2048U, "attachments");
 }
 
 void AttachmentHolder::DisposeHolder()
