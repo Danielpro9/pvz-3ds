@@ -273,10 +273,19 @@ void Trail::Draw(Graphics* g)
 
 void TrailHolder::InitializeHolder()
 {
+#ifdef PS2_PLATFORM
+	// 32, not 2048: nothing in the game code ever calls AllocTrail/AttachTrail
+	// (zero call sites outside their own definitions), so the grown pool was
+	// ~450KB of dead reservation on the ~26MB heap. If a hidden path does
+	// alloc trails, 32 is still plenty and an overflow assert names "trails"
+	// in the [FATAL] log.
+	mTrails.DataArrayInitialize(32U, "trails");
+#else
 	// 2048, not 1024: AllocTrail is unguarded and exit(0)s when the pool fills
 	// (see ReanimationHolder::InitializeHolder). Projectile/effect trails climb
 	// with a heavy horde. Small item; cheap to grow.
 	mTrails.DataArrayInitialize(2048U, "trails");
+#endif
 }
 
 //0x4455A0

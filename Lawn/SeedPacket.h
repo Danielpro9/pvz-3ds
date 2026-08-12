@@ -64,6 +64,10 @@ public:
     void			    UpdateConveyorBelt();
     void			    UpdateWidth();
     void			    RefreshAllPackets();
+	bool                HasKeyboardSelection() const;
+	bool                MoveKeyboardSelection(int theStep);
+	void                ActivateKeyboardSelection();
+	void                ClearKeyboardSelection();
 };
 
 void				    SeedPacketDrawSeed(Graphics* g, float x, float y, SeedType theSeedType, SeedType theImitaterType, float theOffsetX, float theOffsetY, float theScale);

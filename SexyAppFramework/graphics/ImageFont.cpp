@@ -6,6 +6,9 @@
 #include "graphics/GLImage.h"
 #include "misc/AutoCrit.h"
 #include "fcaseopen/fcaseopen.h"
+#ifdef WII_PLATFORM
+#include "platform/wii/WiiEarlyInit.h" // wiiLog for the Prepare() branch probe
+#endif
 
 using namespace Sexy;
 
@@ -254,10 +257,36 @@ bool FontData::GetColorFromDataElement(DataElement* theElement, Color& theColor)
 	return true;
 }
 
+// Pack the character's bytes low-byte-first rather than memcpy'ing them into
+// the char32_t. memcpy puts the string's FIRST byte at the LOWEST ADDRESS,
+// which is the low 8 bits only on a little-endian CPU -- so this was reading
+// the value the file stores through the host's byte order, the one case
+// SexyEndian.h exists for.
+//
+// It mattered because every caller narrows the result to SexyChar, which is a
+// char: FontLayer::GetCharData takes one, and CharDataMap is keyed by one. On
+// big-endian "L" arrived as 0x4C000000 and truncated to 0, so the whole
+// descriptor filed its glyphs under key 0. At draw time nothing matched, the
+// rect came back 0x0, and Graphics::DrawImage returned at its zero-size check
+// without ever creating a texture -- which is why on Wii every string was
+// invisible while sprites drew correctly, and why no font atlas ever appeared
+// in the texture log.
+//
+// The shifts reproduce the little-endian layout on every CPU, so PC and PS2
+// keep exactly the values they have today. Capping at sizeof(ret) also stops a
+// malformed descriptor entry from writing past the char32_t, which the memcpy
+// did for any string longer than four bytes.
+//
+// This packs UTF-8 bytes instead of decoding a code point, which is
+// pre-existing: the lookup side indexes single bytes out of a SexyString, so
+// only ASCII was ever addressable on any platform. Left alone deliberately --
+// real multi-byte support is a change to both sides, not to this function.
 static char32_t UTF8CharToUTF32Char(const std::string &theString)
 {
 	char32_t ret = 0;
-	memcpy(&ret, theString.data(), theString.length());
+	const size_t aByteCount = std::min(theString.length(), sizeof(ret));
+	for (size_t i = 0; i < aByteCount; i++)
+		ret |= (char32_t)(unsigned char)theString[i] << (8 * i);
 	return ret;
 }
 
@@ -1298,6 +1327,30 @@ void ImageFont::GenerateActiveFontLayers()
 				double aLayerPointSize = 1;
 				double aPointSize = mScale;
 
+#ifdef WII_PLATFORM
+				// Which of the two branches below a font takes decides whether it
+				// draws from the shared atlas texture or from a rescaled copy
+				// built by software blits. Identify the font by its atlas width
+				// (1686 renders today; 2636 and 3516 do not) and report the
+				// inputs that pick the branch. Capped so repeated Prepare() calls
+				// cannot flood.
+				{
+					static int sPrepLogged = 0;
+					if (sPrepLogged < 16)
+					{
+						sPrepLogged++;
+						Image* aLayerImage = (Image*)aFontLayer->mImage;
+						const bool aFastPath = (mScale == 1.0) &&
+							((aFontLayer->mPointSize == 0) || (mPointSize == aFontLayer->mPointSize));
+						wiiLog("[WII][PREP] atlas=%dx%d scale=%d.%03d ptSize=%d layerPt=%d -> %s\n",
+							aLayerImage ? aLayerImage->mWidth : -1,
+							aLayerImage ? aLayerImage->mHeight : -1,
+							(int)mScale, (int)((mScale - (int)mScale) * 1000),
+							mPointSize, aFontLayer->mPointSize,
+							aFastPath ? "SHARED" : "RESCALED(software)");
+					}
+				}
+#endif
 				if ((mScale == 1.0) && ((aFontLayer->mPointSize == 0) || (mPointSize == aFontLayer->mPointSize)))
 				{
 					anActiveFontLayer->mScaledImage = aFontLayer->mImage;
@@ -1644,6 +1697,15 @@ void ImageFont::DrawStringEx(Graphics* g, int theX, int theY, const SexyString& 
 			aRenderCommand->mColor = aColor;
 			aRenderCommand->mDest[0] = anImageX;
 			aRenderCommand->mDest[1] = anImageY;
+
+			// Note for whoever ends up here chasing missing text: the mSrc lines
+			// below read the rect with operator[], which default-inserts a 0x0
+			// Rect for a character the layer does not have. That makes a missing
+			// glyph draw nothing at all rather than fail loudly -- Graphics::
+			// DrawImage returns at its zero-size check without even creating the
+			// atlas texture. If text disappears again, check membership with
+			// find() BEFORE these lines; afterwards every lookup reports a hit.
+
 			//aRenderCommand->mSrc[0] = anActiveFontLayer->mScaledCharImageRects[(uchar) aChar].mX;
 			//aRenderCommand->mSrc[1] = anActiveFontLayer->mScaledCharImageRects[(uchar) aChar].mY;
 			//aRenderCommand->mSrc[2] = anActiveFontLayer->mScaledCharImageRects[(uchar) aChar].mWidth;

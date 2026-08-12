@@ -47,10 +47,23 @@ Board::Board(LawnApp* theApp)
 	mApp->mBoard = this;
 	TodHesitationTrace("preboard");
 
+#ifdef PS2_PLATFORM
+	// Right-sized for the ~26MB PS2 heap (~550KB less fixed reserve). These
+	// pools do NOT degrade gracefully when full, so the caps keep 2-3x headroom
+	// over the physical maximums: waves top out at 50 zombies, the 54-cell grid
+	// bounds plants (pot+pumpkin+plant ~162), coins expire on their own, and
+	// projectiles get 512 for starfruit/gatling spam boards. An overflow shows
+	// as "Data array full: <name>" in the [FATAL] log line.
+	mZombies.DataArrayInitialize(512U, "zombies");
+	mPlants.DataArrayInitialize(256U, "plants");
+	mProjectiles.DataArrayInitialize(512U, "projectiles");
+	mCoins.DataArrayInitialize(384U, "coins");
+#else
 	mZombies.DataArrayInitialize(1024U, "zombies");
 	mPlants.DataArrayInitialize(1024U, "plants");
 	mProjectiles.DataArrayInitialize(1024U, "projectiles");
 	mCoins.DataArrayInitialize(1024U, "coins");
+#endif
 	mLawnMowers.DataArrayInitialize(32U, "lawnmowers");
 	mGridItems.DataArrayInitialize(128U, "griditems");
 	TodHesitationTrace("board dataarrays");
@@ -1470,6 +1483,7 @@ void Board::InitLevel()
 	// 初始化字幕播放记录
 	memset(mHelpDisplayed, 0, sizeof(mHelpDisplayed));
 	// 初始化卡槽及卡牌
+	mSeedBank->ClearKeyboardSelection();
 	mSeedBank->mNumPackets = GetNumSeedsInBank();
 	mSeedBank->UpdateWidth();
 	for (int i = 0; i < SEEDBANK_MAX; i++)
@@ -1759,7 +1773,7 @@ void Board::StartLevel()
 		mApp->IsFinalBossLevel())
 		return;
 
-	mApp->mMusic->StartGameMusic();
+	mApp->mMusic->StartGameMusic(this);
 }
 
 //0x40BF10
@@ -7979,6 +7993,22 @@ void Board::KeyDown(KeyCode theKey)
 {
 	DoTypingCheck(theKey);
 
+#ifdef WII_PLATFORM
+	if (mApp->mGameScene == GameScenes::SCENE_PLAYING && mApp->GetDialogCount() == 0)
+	{
+		if (theKey == KeyCode::KEYCODE_LEFT && MoveKeyboardSeedSelection(-1))
+			return;
+		if (theKey == KeyCode::KEYCODE_RIGHT && MoveKeyboardSeedSelection(1))
+			return;
+		if ((theKey == KeyCode::KEYCODE_RETURN || theKey == KeyCode::KEYCODE_SPACE) &&
+			HasKeyboardSeedSelection())
+		{
+			ActivateKeyboardSeedSelection();
+			return;
+		}
+	}
+#endif
+
 	if (mApp->mGameScene == GameScenes::SCENE_LEVEL_INTRO && 
 		mApp->mGameMode != GameMode::GAMEMODE_CHALLENGE_ZEN_GARDEN && 
 		mApp->mGameMode != GameMode::GAMEMODE_TREE_OF_WISDOM)
@@ -8012,6 +8042,40 @@ void Board::KeyDown(KeyCode theKey)
 			mApp->DoNewOptions(false);
 		}
 	}
+}
+
+bool Board::HasKeyboardSeedSelection() const
+{
+	return mApp->mGameScene == GameScenes::SCENE_PLAYING && !mPaused &&
+		mApp->GetDialogCount() == 0 &&
+		!mApp->IsSlotMachineLevel() &&
+		mApp->mCrazyDaveState == CrazyDaveState::CRAZY_DAVE_OFF &&
+		mChallenge->mChallengeState != ChallengeState::STATECHALLENGE_ZEN_FADING &&
+		mCursorObject->mCursorType == CursorType::CURSOR_TYPE_NORMAL &&
+		mSeedBank->HasKeyboardSelection();
+}
+
+bool Board::MoveKeyboardSeedSelection(int theStep)
+{
+	if (mApp->mGameScene != GameScenes::SCENE_PLAYING || mPaused ||
+		mApp->GetDialogCount() > 0 ||
+		mApp->IsSlotMachineLevel() ||
+		mApp->mCrazyDaveState != CrazyDaveState::CRAZY_DAVE_OFF ||
+		mChallenge->mChallengeState == ChallengeState::STATECHALLENGE_ZEN_FADING ||
+		mCursorObject->mCursorType != CursorType::CURSOR_TYPE_NORMAL)
+		return false;
+	return mSeedBank->MoveKeyboardSelection(theStep);
+}
+
+void Board::ActivateKeyboardSeedSelection()
+{
+	if (HasKeyboardSeedSelection())
+		mSeedBank->ActivateKeyboardSelection();
+}
+
+void Board::ClearKeyboardSeedSelection()
+{
+	mSeedBank->ClearKeyboardSelection();
 }
 
 static void TodCrash()

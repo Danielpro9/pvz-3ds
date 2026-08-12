@@ -271,7 +271,7 @@ void ZenGarden::ZenGardenInitLevel()
 
     mBoard->mChallenge->mChallengeStateCounter = 3000;
     AddStinky();
-    mApp->mMusic->StartGameMusic();
+    mApp->mMusic->StartGameMusic(mBoard);
 }
 
 void ZenGarden::ZenGardenStart()

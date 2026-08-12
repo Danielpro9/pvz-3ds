@@ -83,6 +83,7 @@ public:
 	int					DeleteUngroupedImages(const std::set<Image*>& theImages);
 	bool				TodLoadNextResource();
 	bool				TodLoadResources(const std::string& theGroup);
+	virtual void		ResourceLoadedHook(BaseRes* theRes);
 	virtual void		DeleteResources(const std::string& theGroup);
 	using ResourceManager::DeleteResources;
 };

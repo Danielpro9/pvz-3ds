@@ -6,6 +6,8 @@
 #include "SexyAppBase.h"
 #include "misc/Debug.h"
 #include "misc/ResourceManager.h"
+#include "misc/ResourceGroupLease.h"
+#include "../../Sexy.TodLib/TodCommon.h"
 
 using namespace Sexy;
 
@@ -30,11 +32,33 @@ Widget::Widget()
 Widget::~Widget()
 {	
 #ifdef LOW_MEMORY
+	for (std::vector<ResourceGroupLease*>::iterator anItr = mResourceGroupLeases.begin();
+		anItr != mResourceGroupLeases.end(); ++anItr)
+		delete *anItr;
+	mResourceGroupLeases.clear();
+
+	// Compatibility for screens not migrated to leases yet.
 	for (std::string& resource : mLoadedResourceNames)
 		gSexyAppBase->mResourceManager->DeleteResources(resource.c_str());
 #endif
 
 	mColors.clear();
+}
+
+bool Widget::AcquireResourceGroup(const std::string& theGroup)
+{
+#ifdef LOW_MEMORY
+	ResourceGroupLease* aLease = new ResourceGroupLease();
+	if (!aLease->Acquire(gSexyAppBase->mResourceManager, theGroup))
+	{
+		delete aLease;
+		return false;
+	}
+	mResourceGroupLeases.push_back(aLease);
+	return true;
+#else
+	return TodLoadResources(theGroup);
+#endif
 }
 
 void Widget::WidgetRemovedHelper()

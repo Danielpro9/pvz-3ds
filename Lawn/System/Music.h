@@ -2,13 +2,14 @@
 #define __MUSIC_H__
 
 #include <string>
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 struct Mix_Music;
 #else
 #include <SDL_mixer_ext/SDL_mixer_ext.h>
 #endif
 
 class LawnApp;
+class Board;
 namespace Sexy
 {
 	class MusicInterface;
@@ -100,7 +101,7 @@ public:
 	void						StopAllMusic();
 	/*inline*/ void				PlayMusic(MusicTune theMusicTune, int theOffset = -1, int theDrumsOffset = -1);
 	/*inline*/ Mix_Music*		GetMusicHandle(MusicFile theMusicFile);
-	void						StartGameMusic();
+	void						StartGameMusic(Board* theBoard = nullptr);
 	/*inline*/ void				LoadSong(MusicFile theMusicFile, const std::string& theFileName);
 	void						MusicResync();
 	void						UpdateMusicBurst();

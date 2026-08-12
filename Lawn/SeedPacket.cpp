@@ -10,6 +10,11 @@
 #include "../Sexy.TodLib/FilterEffect.h"
 #include "misc/SexyMatrix.h"
 
+namespace
+{
+int gKeyboardSeedIndex = -1;
+}
+
 SeedPacket::SeedPacket()
 {
 	mSlotMachiningPosition = 0.0f;
@@ -913,6 +918,7 @@ SeedBank::SeedBank()
 	mNumPackets = 0;
 	mConveyorBeltCounter = 0;
 	mCutSceneDarken = 255;
+	gKeyboardSeedIndex = -1;
 }
 
 //0x489630
@@ -957,6 +963,19 @@ void SeedBank::Draw(Graphics* g)
 		}
 	}
 
+	if (mBoard->HasKeyboardSeedSelection())
+	{
+		SeedPacket& aSeedPacket = mSeedPackets[gKeyboardSeedIndex];
+		Graphics aFocusG(*g);
+		aFocusG.SetColor(Color(255, 240, 64));
+		const int aFocusX = aSeedPacket.mX + aSeedPacket.mOffsetX;
+		const int aFocusY = aSeedPacket.mY;
+		aFocusG.DrawRect(aFocusX - 2, aFocusY - 2,
+			SEED_PACKET_WIDTH + 3, SEED_PACKET_HEIGHT + 3);
+		aFocusG.DrawRect(aFocusX - 1, aFocusY - 1,
+			SEED_PACKET_WIDTH + 1, SEED_PACKET_HEIGHT + 1);
+	}
+
 	g->ClearClipRect();
 	if (mApp->IsSlotMachineLevel() && mY > -IMAGE_SEEDBANK->GetHeight())
 	{
@@ -980,6 +999,46 @@ void SeedBank::Draw(Graphics* g)
 		g->mTransX += mBoard->mX;
 		g->mTransY += mBoard->mY;
 	}
+}
+
+bool SeedBank::HasKeyboardSelection() const
+{
+	return gKeyboardSeedIndex >= 0 && gKeyboardSeedIndex < mNumPackets &&
+		mSeedPackets[gKeyboardSeedIndex].mPacketType != SeedType::SEED_NONE;
+}
+
+bool SeedBank::MoveKeyboardSelection(int theStep)
+{
+	if (mNumPackets <= 0 || theStep == 0)
+		return false;
+
+	int aSeedIndex = HasKeyboardSelection()
+		? gKeyboardSeedIndex
+		: (theStep > 0 ? -1 : 0);
+	for (int i = 0; i < mNumPackets; i++)
+	{
+		aSeedIndex = (aSeedIndex + theStep) % mNumPackets;
+		if (aSeedIndex < 0)
+			aSeedIndex += mNumPackets;
+		if (mSeedPackets[aSeedIndex].mPacketType != SeedType::SEED_NONE)
+		{
+			gKeyboardSeedIndex = aSeedIndex;
+			mApp->PlaySample(Sexy::SOUND_GRAVEBUTTON);
+			return true;
+		}
+	}
+	return false;
+}
+
+void SeedBank::ActivateKeyboardSelection()
+{
+	if (HasKeyboardSelection())
+		mSeedPackets[gKeyboardSeedIndex].MouseDown(0, 0, 1);
+}
+
+void SeedBank::ClearKeyboardSelection()
+{
+	gKeyboardSeedIndex = -1;
 }
 
 //0x489970
@@ -1045,6 +1104,9 @@ void SeedBank::RemoveSeed(int theIndex)
 {
 	TOD_ASSERT(mBoard->HasConveyorBeltSeedBank());
 	TOD_ASSERT(theIndex >= 0 && theIndex < GetNumSeedsOnConveyorBelt());
+
+	if (gKeyboardSeedIndex > theIndex)
+		gKeyboardSeedIndex--;
 
 	for (int i = theIndex; i < mNumPackets; i++)
 	{

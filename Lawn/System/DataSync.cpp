@@ -1,5 +1,6 @@
 #include "DataSync.h"
 #include "fcaseopen/fcaseopen.h"
+#include "misc/SexyEndian.h"
 
 DataReader::DataReader()
 {
@@ -10,7 +11,7 @@ DataReader::DataReader()
 	mOwnData = false;
 }
 
-//0x441B20、0x441B80
+//0x441B20, 0x441B80
 DataReader::~DataReader()
 {
 	if (mFile)
@@ -93,14 +94,14 @@ unsigned short DataReader::ReadShort()
 {
 	unsigned short aShort;
 	ReadBytes(&aShort, sizeof(aShort));
-	return aShort;
+	return SexyLE16(aShort);
 }
 
 uint32_t DataReader::ReadLong()
 {
 	unsigned int aLong;
 	ReadBytes(&aLong, sizeof(aLong));
-	return aLong;
+	return SexyLE32(aLong);
 }
 
 unsigned char DataReader::ReadByte()
@@ -121,14 +122,14 @@ float DataReader::ReadFloat()
 {
 	float aFloat;
 	ReadBytes(&aFloat, sizeof(aFloat));
-	return aFloat;
+	return SexyLEFloat(aFloat);
 }
 
 double DataReader::ReadDouble()
 {
 	double aDouble;
 	ReadBytes(&aDouble, sizeof(aDouble));
-	return aDouble;
+	return SexyLEDouble(aDouble);
 }
 
 void DataReader::ReadString(SexyString& theStr)
@@ -499,7 +500,7 @@ DataWriter::DataWriter()
 	mCapacity = 0;
 }
 
-//0x4436A0、0x4436F0
+//0x4436A0, 0x4436F0
 DataWriter::~DataWriter()
 {
 	if (mFile)
@@ -534,14 +535,14 @@ void DataWriter::EnsureCapacity(uint32_t theNumBytes)
 {
 	if (mCapacity < theNumBytes)
 	{
-		// 每次将容量乘 2 直到容量达到 theNumBytes 或更多
+		// Double capacity until it reaches the requested size.
 		do { mCapacity <<= 1; } while (mCapacity < theNumBytes);
 
-		// 申请新内存
+		// Allocate the new buffer.
 		char* aData = new char[mCapacity];
-		// 将原数据迁移至新内存区域中
+		// Move the existing data into the new buffer.
 		memcpy(aData, mData, mDataLen);
-		// 释放旧有内存区域
+		// Release the old buffer.
 		delete[] mData;
 		mData = aData;
 	}
@@ -592,6 +593,7 @@ void DataWriter::WriteLong(uint32_t theLong)
 	//{
 	//	fwrite(&theLong, sizeof(char), sizeof(uint32_t) / sizeof(char), mFile);
 	//}
+	theLong = SexyLE32(theLong);
 	WriteBytes(&theLong, sizeof(uint32_t));
 }
 
@@ -608,6 +610,7 @@ void DataWriter::WriteShort(unsigned short theShort)
 	//{
 	//	fwrite(&theShort, sizeof(char), sizeof(short) / sizeof(char), mFile);
 	//}
+	theShort = SexyLE16(theShort);
 	WriteBytes(&theShort, sizeof(unsigned short));
 }
 
@@ -623,11 +626,13 @@ void DataWriter::WriteBool(bool theBool)
 
 void DataWriter::WriteFloat(float theFloat)
 {
+	theFloat = SexyLEFloat(theFloat);
 	WriteBytes(&theFloat, sizeof(float));
 }
 
 void DataWriter::WriteDouble(double theDouble)
 {
+	theDouble = SexyLEDouble(theDouble);
 	WriteBytes(&theDouble, sizeof(double));
 }
 

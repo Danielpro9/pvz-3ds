@@ -7,10 +7,15 @@
 #include <new>
 #include <cstdio>
 #include "paklib/PakInterface.h"
+// GIF headers are little-endian on disk, and libpng hands back pixel bytes in a
+// fixed order that only matches the engine's packed 0xAARRGGBB on a
+// little-endian host. Both go through this header.
+#include "misc/SexyEndian.h"
 
 #ifdef PS2_PLATFORM
 #include <malloc.h>
 #include "platform/ps2/Ps2IoLock.h" // printf = fio RPC; serialize with pak IO
+#include "platform/ps2/Ps2BigArena.h" // big decode buffers live in the reserved arena
 #include "SexyAppBase.h"
 // Bytes currently handed out by malloc (grows toward the ~32 MB EE ceiling).
 static long Ps2UsedHeapBytes()
@@ -73,19 +78,20 @@ Image::Image()
 	mWidth = 0;
 	mHeight = 0;
 	mBits = NULL;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_IMAGES
 	mColorTable = NULL;
 	mColorIndices = NULL;
 	mRGBBits = NULL;
 	mHasTrans = false;
 	mHasAlpha = false;
+	mBitsHasCanarySlot = false;
 #endif
 }
 
 Image::~Image()
 {
 	delete[] mBits;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_IMAGES
 	delete[] mColorTable;
 	delete[] mColorIndices;
 	delete[] mRGBBits;
@@ -104,13 +110,27 @@ int	Image::GetHeight()
 
 uint32_t* Image::GetBits()
 {
+#ifdef SEXY_COMPACT_IMAGES
+	if (mBits == NULL && ((mColorTable != NULL && mColorIndices != NULL)
 #ifdef PS2_PLATFORM
-	if (mBits == NULL && ((mColorTable != NULL && mColorIndices != NULL) || mRGBBits != NULL))
+		|| mRGBBits != NULL
+#endif
+		))
 	{
 		int aSize = mWidth * mHeight;
-		mBits = Ps2AllocImageBits(aSize);
+		// +1: leave the canary slot so LoadLazyImageBits can adopt this buffer
+		// instead of duplicating it (second w*h*4 contiguous block).
+#ifdef PS2_PLATFORM
+		mBits = Ps2AllocImageBits(aSize + 1);
+#else
+		// Wii needs no purge-and-retry wrapper here: the operator new rescue in
+		// platform/wii/WiiHeap.cpp already purges lazy bits and retries (arena
+		// first) before any allocation is allowed to fail.
+		mBits = new (std::nothrow) uint32_t[aSize + 1];
+#endif
 		if (mBits == NULL)
 			return NULL;
+		mBitsHasCanarySlot = true;
 
 		if (mColorTable != NULL && mColorIndices != NULL)
 		{
@@ -121,6 +141,7 @@ uint32_t* Image::GetBits()
 			mColorTable = NULL;
 			mColorIndices = NULL;
 		}
+#ifdef PS2_PLATFORM
 		else if (mRGBBits != NULL)
 		{
 			unsigned char* src = mRGBBits;
@@ -134,6 +155,7 @@ uint32_t* Image::GetBits()
 			delete[] mRGBBits;
 			mRGBBits = NULL;
 		}
+#endif
 	}
 #endif
 	return mBits;
@@ -200,22 +222,47 @@ Image* GetPNGImage(const std::string& theFileName)
     // One fio round-trip for the whole file, then decode from RAM. A local
     // vector frees itself on every return path below (fp is still closed by
     // the existing p_fclose calls). See Ps2PngMemSource above.
-    p_fseek(fp, 0, SEEK_END);
-    int aPngFileSize = p_ftell(fp);
-    p_fseek(fp, 0, SEEK_SET);
     std::vector<unsigned char> aPngFileData;
     Ps2PngMemSource aPngSrc = { NULL, 0, 0 };
-    if (aPngFileSize > 0)
+    if (fp->mRecord != NULL && fp->mBuffer != NULL)
     {
-        aPngFileData.resize((size_t)aPngFileSize);
-        if ((int)p_fread(&aPngFileData[0], 1, aPngFileSize, fp) != aPngFileSize)
+        // Pak-backed file: FOpen already holds the whole decrypted record in
+        // RAM until p_fclose (which runs after every libpng read below). Feed
+        // libpng straight from it — the staging copy in the else branch is a
+        // second file-size contiguous block, and that transient is what OOMs
+        // first on a fragmented heap.
+        aPngSrc.mData = fp->mBuffer;
+        aPngSrc.mSize = (size_t)fp->mRecord->mSize;
+    }
+    else
+    {
+        p_fseek(fp, 0, SEEK_END);
+        int aPngFileSize = p_ftell(fp);
+        p_fseek(fp, 0, SEEK_SET);
+        if (aPngFileSize > 0)
         {
-            printf("[PNG] whole-file read failed '%s' (%d bytes)\n", theFileName.c_str(), aPngFileSize);
-            p_fclose(fp);
-            return NULL;
+            // resize() throws on a fragmented heap, and an uncaught bad_alloc
+            // here took the whole game down (main catch-all). Fail the decode
+            // instead: the caller keeps its stub/NULL path.
+            try
+            {
+                aPngFileData.resize((size_t)aPngFileSize);
+            }
+            catch (std::bad_alloc&)
+            {
+                printf("[PNG] staging OOM '%s' (%d bytes) — decode dropped\n", theFileName.c_str(), aPngFileSize);
+                p_fclose(fp);
+                return NULL;
+            }
+            if ((int)p_fread(&aPngFileData[0], 1, aPngFileSize, fp) != aPngFileSize)
+            {
+                printf("[PNG] whole-file read failed '%s' (%d bytes)\n", theFileName.c_str(), aPngFileSize);
+                p_fclose(fp);
+                return NULL;
+            }
+            aPngSrc.mData = &aPngFileData[0];
+            aPngSrc.mSize = (size_t)aPngFileSize;
         }
-        aPngSrc.mData = &aPngFileData[0];
-        aPngSrc.mSize = (size_t)aPngFileSize;
     }
 #endif
 
@@ -284,16 +331,23 @@ Image* GetPNGImage(const std::string& theFileName)
     Ps2IoLockRelease();
 #endif
 
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_IMAGES
     bool keepPalette = (color_type == PNG_COLOR_TYPE_PALETTE && bit_depth <= 8);
-    bool keepRgb = (color_type == PNG_COLOR_TYPE_RGB && bit_depth == 8);
     bool hasTRNS = png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS) != 0;
+#ifdef PS2_PLATFORM
+    // 24-bit RGB is PS2-only: only its GS upload path expands a piece at a time.
+    // Elsewhere nothing can read mRGBBits, so an image kept in that form would
+    // draw as nothing.
+    bool keepRgb = (color_type == PNG_COLOR_TYPE_RGB && bit_depth == 8);
     if (hasTRNS)
     {
         // Palette stays compact: tRNS alpha is baked into the 32-bit color
         // table below. Only the RGB fast path can't carry alpha.
         keepRgb = false;
     }
+#else
+    const bool keepRgb = false;
+#endif
 
     if (keepPalette)
     {
@@ -324,6 +378,14 @@ Image* GetPNGImage(const std::string& theFileName)
 
     png_size_t rowbytes = png_get_rowbytes(png_ptr, info_ptr);
 
+#ifdef SEXY_COMPACT_IMAGES
+    // Depth-8 palette rows land in the file exactly as the final index buffer
+    // expects them (rowbytes == width), so decode straight into it and skip
+    // the whole-image staging copy — for a 1400x600 background that is 840KB
+    // less transient heap at the tightest moment of a load.
+    bool aDirectPalette = keepPalette && rowbytes == (png_size_t)width;
+#endif
+
 #ifdef PS2_PLATFORM
     Ps2IoLockAcquire();
     printf("[PvZ PS2] Decoded rowbytes=%u channels=%u decode=%.2f MB heapUsed=%.2f MB\n",
@@ -332,20 +394,67 @@ Image* GetPNGImage(const std::string& theFileName)
         (double)(rowbytes * height) / (1024.0 * 1024.0),
         (double)Ps2UsedHeapBytes() / (1024.0 * 1024.0));
     Ps2IoLockRelease();
+
+    // Hard-ceiling guard: an allocation that pushes the arena past ~26MB does
+    // not fail cleanly, it takes the console down with no log (see
+    // IsHeapUnderPressure). If this decode's transient peak would cross the
+    // guard line, shed purgeable bits first; if that is not enough, refuse
+    // the decode — the caller keeps its stub/NULL path and the game lives.
+    long aDecodePeak = (long)(rowbytes * height);
+    if (keepPalette && !aDirectPalette)
+        aDecodePeak += (long)width * (long)height;
+    // The big-block arena carved PS2_BIG_ARENA_BYTES out of the general
+    // heap's ceiling, so the guard line moves down with it. A big decode
+    // buffer is served from the arena (invisible to mallinfo) — when the
+    // arena has room for the whole peak, this decode puts no pressure on
+    // the general heap at all and the guard must not refuse it.
+    const long aHeapGuardLine = (25L << 20) - (long)PS2_BIG_ARENA_BYTES;
+    bool aFitsArena = aDecodePeak >= (long)PS2_BIG_ALLOC_THRESHOLD &&
+        (long)(PS2_BIG_ARENA_BYTES - Ps2BigUsedBytes()) >= aDecodePeak;
+    if (!aFitsArena &&
+        Sexy::gSexyAppBase != NULL && Ps2UsedHeapBytes() + aDecodePeak > aHeapGuardLine)
+    {
+        Sexy::gSexyAppBase->PurgeLazyImageBits(true);
+        if (Ps2UsedHeapBytes() + aDecodePeak > aHeapGuardLine)
+        {
+            // Bits alone are often not enough right after a heavy scene: the
+            // GL shim's per-texture CPU copies hold several MB that only the
+            // full purge releases (it degrades itself to bits-only when
+            // called off the main thread). Escalate before refusing — a
+            // refusal here is a black sprite until its cooldown retry.
+            Sexy::gSexyAppBase->PurgeLazyImages();
+        }
+        if (Ps2UsedHeapBytes() + aDecodePeak > aHeapGuardLine)
+        {
+            printf("[PvZ PS2] decode REFUSED '%s' (%ux%u): +%ldKB would cross the heap ceiling (used %.2fMB)\n",
+                theFileName.c_str(), (unsigned)width, (unsigned)height,
+                aDecodePeak / 1024, (double)Ps2UsedHeapBytes() / (1024.0 * 1024.0));
+            png_destroy_read_struct(&png_ptr, &info_ptr, (png_infopp)NULL);
+            p_fclose(fp);
+            return NULL;
+        }
+    }
 #endif
 
+#ifdef SEXY_COMPACT_IMAGES
+    // Spare canary slot past the pixels: when this buffer ends up as mBits
+    // (RGBA branch below) a MemoryImage can adopt it without re-allocating.
+    size_t aBitsSize = rowbytes * height + sizeof(uint32_t);
+#else
+    size_t aBitsSize = rowbytes * height;
+#endif
     png_bytep* row_pointers = new (std::nothrow) png_bytep[height];
-    uint8_t* aBits = new (std::nothrow) uint8_t[rowbytes * height];
+    uint8_t* aBits = new (std::nothrow) uint8_t[aBitsSize];
 
 #ifdef PS2_PLATFORM
     if (aBits == NULL && Sexy::gSexyAppBase != NULL)
     {
         Sexy::gSexyAppBase->PurgeLazyImageBits(true);
-        aBits = new (std::nothrow) uint8_t[rowbytes * height];
+        aBits = new (std::nothrow) uint8_t[aBitsSize];
         if (aBits == NULL)
         {
             Sexy::gSexyAppBase->PurgeLazyImages();
-            aBits = new (std::nothrow) uint8_t[rowbytes * height];
+            aBits = new (std::nothrow) uint8_t[aBitsSize];
         }
     }
     if (row_pointers == NULL && aBits != NULL)
@@ -372,7 +481,27 @@ Image* GetPNGImage(const std::string& theFileName)
 
     delete[] row_pointers;
 
-#ifdef PS2_PLATFORM
+#if SEXY_BIG_ENDIAN
+    // png_set_filler(AFTER) + png_set_bgr() above laid the pixel out as the
+    // bytes B,G,R,A. The engine reads mBits as the packed VALUE 0xAARRGGBB,
+    // which those bytes spell only on a little-endian host; big-endian reads
+    // them as 0xBBGGRRAA, taking alpha from the blue channel. One swap per
+    // pixel restores the order the rest of the engine assumes.
+    //
+    // Only the 4-byte path needs this. The compact palette (1 byte/pixel) and
+    // RGB (3 bytes/pixel) decodes are byte streams with no packed integer to
+    // reverse, and their color tables are built with shifts, so they are
+    // already portable.
+    if (rowbytes == (png_size_t)width * 4)
+    {
+        uint32_t* aPixel = (uint32_t*)aBits;
+        const size_t aCount = (size_t)width * height;
+        for (size_t i = 0; i < aCount; i++)
+            aPixel[i] = SexyLE32(aPixel[i]);
+    }
+#endif
+
+#ifdef SEXY_COMPACT_IMAGES
     uint32_t paletteCopy[256];
     int numPaletteCopy = 0;
     bool aPalHasTrans = false;
@@ -416,40 +545,51 @@ Image* GetPNGImage(const std::string& theFileName)
     Image* anImage = new Image();
     anImage->mWidth = width;
     anImage->mHeight = height;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_IMAGES
     if (keepPalette)
     {
         anImage->mColorTable = new (std::nothrow) uint32_t[256];
-        anImage->mColorIndices = new (std::nothrow) unsigned char[width * height];
+        if (aDirectPalette)
+            anImage->mColorIndices = aBits;  // rows were decoded straight into place
+        else
+            anImage->mColorIndices = new (std::nothrow) unsigned char[width * height];
         if (anImage->mColorTable != NULL && anImage->mColorIndices != NULL)
         {
             for (int i = 0; i < 256; i++)
                 anImage->mColorTable[i] = 0xFF000000;
             memcpy(anImage->mColorTable, paletteCopy, numPaletteCopy * sizeof(uint32_t));
-            for (uint32_t y = 0; y < height; y++)
-                memcpy(anImage->mColorIndices + y * width, aBits + y * rowbytes, width);
+            if (!aDirectPalette)
+            {
+                for (uint32_t y = 0; y < height; y++)
+                    memcpy(anImage->mColorIndices + y * width, aBits + y * rowbytes, width);
+                delete[] aBits;
+            }
             anImage->mHasTrans = aPalHasTrans;
             anImage->mHasAlpha = aPalHasAlpha;
-            delete[] aBits;
         }
         else
         {
+            if (aDirectPalette)
+                anImage->mColorIndices = NULL;  // aBits still owns the buffer
             delete[] aBits;
             delete anImage;
             return NULL;
         }
     }
+#ifdef PS2_PLATFORM
     else if (keepRgb)
     {
         anImage->mRGBBits = aBits;
         anImage->mHasTrans = false;
         anImage->mHasAlpha = false;
     }
+#endif
     else
 #endif
     {
         anImage->mBits = (uint32_t*)aBits;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_IMAGES
+        anImage->mBitsHasCanarySlot = true;
         anImage->mHasTrans = false;
         anImage->mHasAlpha = false;
         uint32_t* ptr = anImage->mBits;
@@ -504,6 +644,8 @@ Image* GetTGAImage(const std::string& theFileName)
 
 	WORD anImageHeight;
 	p_fread(&anImageHeight, sizeof(WORD), 1, aTGAFile);	
+	anImageWidth = SexyLE16(anImageWidth);
+	anImageHeight = SexyLE16(anImageHeight);
 
 	BYTE aBitCount = 32;
 	p_fread(&aBitCount, sizeof(BYTE), 1, aTGAFile);	
@@ -535,6 +677,11 @@ Image* GetTGAImage(const std::string& theFileName)
 #endif
 
 	p_fread(anImage->mBits, 4, anImage->mWidth*anImage->mHeight, aTGAFile);
+
+#if SEXY_BIG_ENDIAN
+	for (int i = 0; i < anImage->mWidth * anImage->mHeight; i++)
+		anImage->mBits[i] = SexyLE32(anImage->mBits[i]);
+#endif
 
 	p_fclose(aTGAFile);
 
@@ -593,7 +740,10 @@ Image* GetGIFImage(const std::string& theFileName)
 
 	// 文件头的 ASCII 值为“GIF87a”或”GIF89a”，其中前三位为 GIF 签名，后三位为不同年份的版本号
 	if (((strncmp((char*)magick, "GIF87", 5) != 0) && (strncmp((char*)magick, "GIF89", 5) != 0)))
+	{
+		p_fclose(fp);
 		return NULL;
+	}
 
 	global_colors = 0;
 	global_colormap = (unsigned char*)NULL;
@@ -604,6 +754,8 @@ Image* GetGIFImage(const std::string& theFileName)
 	// 读取逻辑屏幕描述符，共 7 字节
 	p_fread(&pw, sizeof(short), 1, fp);  // 读取图像渲染区域的宽度
 	p_fread(&ph, sizeof(short), 1, fp);  // 读取图像渲染区域的高度
+	pw = (short)SexyLE16((unsigned short)pw);
+	ph = (short)SexyLE16((unsigned short)ph);
 	p_fread(&flag, sizeof(char), 1, fp);  // 读取图像标志
 	p_fread(&background, sizeof(char), 1, fp);  // 读取背景色在全局颜色列表中的索引，若无全局颜色列表则此字节无效
 	p_fread(&c, sizeof(char), 1, fp);  // 读取像素宽高比
@@ -742,6 +894,10 @@ Image* GetGIFImage(const std::string& theFileName)
 		p_fread(&pagey, sizeof(short), 1, fp);  // 读取帧的纵坐标（Top）
 		p_fread(&width, sizeof(short), 1, fp);  // 读取帧的横向宽度（Width）
 		p_fread(&height, sizeof(short), 1, fp);  // 取得帧的纵向高度（Height）
+		pagex = (short)SexyLE16((unsigned short)pagex);
+		pagey = (short)SexyLE16((unsigned short)pagey);
+		width = (short)SexyLE16((unsigned short)width);
+		height = (short)SexyLE16((unsigned short)height);
 		p_fread(&flag, sizeof(char), 1, fp);  // 读取帧标志的压缩字节
 
 		colors = !BitSet(flag, 0x80) ? global_colors : 1 << ((flag & 0x07) + 1);  // 判断使用全局颜色列表或使用局部颜色列表，并取得列表大小
@@ -762,8 +918,13 @@ Image* GetGIFImage(const std::string& theFileName)
 		CloseBlob(image);
 		return(image);
 		}*/
-		if ((width == 0) || (height == 0))
+		if (width <= 0 || height <= 0 || width > 4096 || height > 4096)
+		{
+			delete[] colortable;
+			delete[] global_colormap;
+			p_fclose(fp);
 			return NULL;
+		}
 		/*
 		Inititialize colormap.
 		*/
@@ -1263,6 +1424,14 @@ bool ImageLib::WritePNGImage(const std::string& theFileName, Image* theImage)
 	/* if the image has an alpha channel then */
 	sig_bit.alpha = 8;
 	png_set_sBIT(png_ptr, info_ptr, &sig_bit);
+	// LITTLE-ENDIAN ONLY. png_set_bgr() expects the packed 0xAARRGGBB in mBits
+	// to sit in memory as the bytes B,G,R,A, which is only true on a
+	// little-endian host; on big-endian the rows below go out with the channels
+	// rotated. Not fixed here because the only live caller is DumpProgramInfo()
+	// (Shift+F11, dev-only) and swapping would need a scratch row that leaks if
+	// libpng longjmps out of the write. If this writer ever gains a real caller
+	// on a big-endian target, swap each row through a temp buffer with
+	// SexyLE32() rather than in place — mBits belongs to a live image.
 	png_set_bgr(png_ptr);
 
 	png_set_IHDR(png_ptr, info_ptr, theImage->mWidth, theImage->mHeight, 8, PNG_COLOR_TYPE_RGB_ALPHA,
@@ -1842,6 +2011,9 @@ Image* ImageLib::GetImage(const std::string& theFilename, bool lookForAlphaImage
 				unsigned char* aNewData = Rescale(anImage->mWidth, anImage->mHeight, aNewWidth, aNewHeight, anOldData);
 				delete[] anImage->mBits;
 				anImage->mBits = (uint32_t*)aNewData;
+#ifdef PS2_PLATFORM
+				anImage->mBitsHasCanarySlot = false; // Rescale's buffer has no spare slot
+#endif
 				anImage->mWidth = aNewWidth;
 				anImage->mHeight = aNewHeight;
 			}
@@ -1875,21 +2047,48 @@ Image* ImageLib::GetImage(const std::string& theFilename, bool lookForAlphaImage
 			if ((anImage->mWidth == anAlphaImage->mWidth) &&
 				(anImage->mHeight == anAlphaImage->mHeight))
 			{
+				int aSize = anImage->mWidth*anImage->mHeight;
 				uint32_t* aBits1 = anImage->GetBits();
-				uint32_t* aBits2 = anAlphaImage->GetBits();
-				if (aBits1 != NULL && aBits2 != NULL)
+				if (aBits1 == NULL)
 				{
-					int aSize = anImage->mWidth*anImage->mHeight;
-
-					for (int i = 0; i < aSize; i++)
-					{
-						*aBits1 = (*aBits1 & 0x00FFFFFF) | ((*aBits2 & 0xFF) << 24);
-						++aBits1;
-						++aBits2;
-					}
-				}
-				else
 					printf("[IMG] OOM expanding '%s' for alpha compose; alpha dropped\n", theFilename.c_str());
+				}
+#ifdef PS2_PLATFORM
+				// Compact companions carry the per-pixel alpha byte already
+				// (palette entry / RGB blue channel — the same byte the
+				// expanded compose reads as *aBits2 & 0xFF). Reading it in
+				// place skips the companion's own w*h*4 expansion, which under
+				// heap pressure is the allocation that dies first.
+				else if (anAlphaImage->mBits == NULL &&
+					anAlphaImage->mColorTable != NULL && anAlphaImage->mColorIndices != NULL)
+				{
+					const uint32_t* aTable = anAlphaImage->mColorTable;
+					const unsigned char* anIndices = anAlphaImage->mColorIndices;
+					for (int i = 0; i < aSize; i++)
+						aBits1[i] = (aBits1[i] & 0x00FFFFFF) | ((aTable[anIndices[i]] & 0xFF) << 24);
+				}
+				else if (anAlphaImage->mBits == NULL && anAlphaImage->mRGBBits != NULL)
+				{
+					const unsigned char* aRgb = anAlphaImage->mRGBBits;
+					for (int i = 0; i < aSize; i++)
+						aBits1[i] = (aBits1[i] & 0x00FFFFFF) | ((uint32_t)aRgb[i * 3 + 2] << 24);
+				}
+#endif
+				else
+				{
+					uint32_t* aBits2 = anAlphaImage->GetBits();
+					if (aBits2 != NULL)
+					{
+						for (int i = 0; i < aSize; i++)
+						{
+							*aBits1 = (*aBits1 & 0x00FFFFFF) | ((*aBits2 & 0xFF) << 24);
+							++aBits1;
+							++aBits2;
+						}
+					}
+					else
+						printf("[IMG] OOM expanding '%s' for alpha compose; alpha dropped\n", theFilename.c_str());
+				}
 			}
 
 			delete anAlphaImage;

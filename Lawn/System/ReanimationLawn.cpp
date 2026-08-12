@@ -6,6 +6,54 @@
 #include "graphics/Color.h"
 #include "../../Sexy.TodLib/Reanimator.h"
 #include "graphics/MemoryImage.h"
+#include "misc/GraphicsBlockArena.h"
+
+static void CompactCachedFrame(MemoryImage* theImage)
+{
+#ifdef LOW_MEMORY
+	// Almanac/seed packet frames live for a long time but only need 8-bit
+	// indexed pixels. Keeping every one at 32bpp both wastes RAM and makes a
+	// failed first render become a permanently blank cached entry.
+	if (theImage != nullptr)
+		theImage->Palletize();
+#else
+	(void)theImage;
+#endif
+}
+
+// A decode/allocation failure while software-rendering a thumbnail used to
+// leave an all-transparent image in ReanimatorCache forever.  Do not publish
+// a frame until it contains at least one visible pixel; callers will retry on
+// a later draw after the pressure cleanup has had a chance to run.
+static MemoryImage* FinalizeCachedFrame(MemoryImage* theImage, const char* theKind, int theType)
+{
+	if (theImage == nullptr || theImage->mBits == nullptr)
+	{
+		delete theImage;
+		TodTrace("cached %s frame %d unavailable; will retry", theKind, theType);
+		return nullptr;
+	}
+
+	const int aPixelCount = theImage->mWidth * theImage->mHeight;
+	bool aHasVisiblePixel = false;
+	for (int i = 0; i < aPixelCount; i++)
+	{
+		if ((theImage->mBits[i] >> 24) != 0)
+		{
+			aHasVisiblePixel = true;
+			break;
+		}
+	}
+	if (!aHasVisiblePixel)
+	{
+		delete theImage;
+		TodTrace("cached %s frame %d was blank; will retry", theKind, theType);
+		return nullptr;
+	}
+
+	CompactCachedFrame(theImage);
+	return theImage;
+}
 
 //0x46EF00
 void ReanimatorCache::UpdateReanimationForVariation(Reanimation* theReanim, DrawVariation theDrawVariation)
@@ -102,7 +150,11 @@ MemoryImage* ReanimatorCache::MakeBlankMemoryImage(int theWidth, int theHeight)
 	MemoryImage* aImage = new MemoryImage();
 
 	int aBitsCount = theWidth * theHeight;
-	aImage->mBits = new uint32_t[aBitsCount + 1];
+#ifdef WII_PLATFORM
+	aImage->mBits = static_cast<uint32_t*>(ConsoleGraphicsAlloc((aBitsCount + 1) * sizeof(uint32_t)));
+	if (aImage->mBits == nullptr)
+#endif
+		aImage->mBits = new uint32_t[aBitsCount + 1];
 	aImage->mWidth = theWidth;
 	aImage->mHeight = theHeight;
 	aImage->mHasTrans = true;
@@ -190,7 +242,7 @@ MemoryImage* ReanimatorCache::MakeCachedMowerFrame(LawnMowerType theMowerType)
 		break;
 	}
 
-	return aImage;
+	return FinalizeCachedFrame(aImage, "mower", (int)theMowerType);
 }
 
 //0x46F550
@@ -245,7 +297,7 @@ MemoryImage* ReanimatorCache::MakeCachedPlantFrame(SeedType theSeedType, DrawVar
 		}
 	}
 
-	return aMemoryImage;
+	return FinalizeCachedFrame(aMemoryImage, "plant", (int)theSeedType);
 }
 
 //0x46F8A0
@@ -320,13 +372,14 @@ MemoryImage* ReanimatorCache::MakeCachedZombieFrame(ZombieType theZombieType)
 
 		DrawReanimatorFrame(&aMemoryGraphics, aPosX, aPosY, aZombieDef.mReanimationType, aTrackName, DrawVariation::VARIATION_NORMAL);
 	}
-	return aMemoryImage;
+	return FinalizeCachedFrame(aMemoryImage, "zombie", (int)theZombieType);
 }
 
 //0x46FDC0
 void ReanimatorCache::ReanimatorCacheInitialize()
 {
 	mApp = (LawnApp*)gSexyAppBase;
+	mLowMemoryMenuCacheFamily = 0;
 	for (int i = 0; i < SeedType::NUM_SEED_TYPES; i++)
 		mPlantImages[i] = nullptr;
 	for (int i = 0; i < LawnMowerType::NUM_MOWER_TYPES; i++)
@@ -343,7 +396,7 @@ void ReanimatorCache::ReanimatorCacheDispose()
 
 // Frees every cached pre-rendered frame; they rebuild lazily on the next
 // DrawCached* call, so this can run at any screen transition to reclaim RAM.
-void ReanimatorCache::ReanimatorCachePurge()
+void ReanimatorCache::ReanimatorCachePurgePlants()
 {
 	for (int i = 0; i < SeedType::NUM_SEED_TYPES; i++)
 	{
@@ -356,15 +409,26 @@ void ReanimatorCache::ReanimatorCachePurge()
 		if (aImageVariation.mImage != nullptr)
 			delete aImageVariation.mImage;
 	}
-	for (int i = 0; i < LawnMowerType::NUM_MOWER_TYPES; i++)
-	{
-		delete mLawnMowers[i];
-		mLawnMowers[i] = nullptr;
-	}
+}
+
+void ReanimatorCache::ReanimatorCachePurgeZombies()
+{
 	for (int i = 0; i < ZombieType::NUM_CACHED_ZOMBIE_TYPES; i++)
 	{
 		delete mZombieImages[i];
 		mZombieImages[i] = nullptr;
+	}
+}
+
+void ReanimatorCache::ReanimatorCachePurge()
+{
+	ReanimatorCachePurgePlants();
+	ReanimatorCachePurgeZombies();
+	mLowMemoryMenuCacheFamily = 0;
+	for (int i = 0; i < LawnMowerType::NUM_MOWER_TYPES; i++)
+	{
+		delete mLawnMowers[i];
+		mLawnMowers[i] = nullptr;
 	}
 }
 
@@ -373,6 +437,17 @@ void ReanimatorCache::ReanimatorCachePurge()
 void ReanimatorCache::DrawCachedPlant(Graphics* g, float thePosX, float thePosY, SeedType theSeedType, DrawVariation theDrawVariation)
 {
 	TOD_ASSERT(theSeedType >= 0 && theSeedType < SeedType::NUM_SEED_TYPES);
+
+#ifdef LOW_MEMORY
+	// Menu pages never need plant and zombie thumbnail families at once.  The
+	// first request after a page switch drops the opposite family without
+	// coupling the cache to AlmanacDialog's platform-specific UI code.
+	if (mApp->mBoard == nullptr && mLowMemoryMenuCacheFamily != 1)
+	{
+		ReanimatorCachePurgeZombies();
+		mLowMemoryMenuCacheFamily = 1;
+	}
+#endif
 
 	MemoryImage* aImage = nullptr;
 	bool aBuiltFrame = false;
@@ -391,12 +466,15 @@ void ReanimatorCache::DrawCachedPlant(Graphics* g, float thePosX, float thePosY,
 		if (aImage == nullptr)
 		{
 			aImage = MakeCachedPlantFrame(theSeedType, theDrawVariation);
-			aBuiltFrame = true;
-			ReanimCacheImageVariation aNewImageVariation;
-			aNewImageVariation.mSeedType = theSeedType;
-			aNewImageVariation.mDrawVariation = theDrawVariation;
-			aNewImageVariation.mImage = aImage;
-			mImageVariationList.AddHead(aNewImageVariation);
+			if (aImage != nullptr)
+			{
+				aBuiltFrame = true;
+				ReanimCacheImageVariation aNewImageVariation;
+				aNewImageVariation.mSeedType = theSeedType;
+				aNewImageVariation.mDrawVariation = theDrawVariation;
+				aNewImageVariation.mImage = aImage;
+				mImageVariationList.AddHead(aNewImageVariation);
+			}
 		}
 	}
 	else
@@ -405,8 +483,11 @@ void ReanimatorCache::DrawCachedPlant(Graphics* g, float thePosX, float thePosY,
 		if (aImage == nullptr)
 		{
 			aImage = MakeCachedPlantFrame(theSeedType, DrawVariation::VARIATION_NORMAL);
-			aBuiltFrame = true;
-			mPlantImages[(int)theSeedType] = aImage;
+			if (aImage != nullptr)
+			{
+				aBuiltFrame = true;
+				mPlantImages[(int)theSeedType] = aImage;
+			}
 		}
 	}
 
@@ -418,11 +499,18 @@ void ReanimatorCache::DrawCachedPlant(Graphics* g, float thePosX, float thePosY,
 	// during the level intro (chooser/cutscene): mid-level a definition freed
 	// here could belong to a plant about to be placed and would re-decode with
 	// a visible hitch. Chosen plants reload at CutScene::EndSeedChooser.
-	if (aBuiltFrame && mApp->mGameScene == GameScenes::SCENE_LEVEL_INTRO)
+	// In menu screens do this even when the thumbnail was already cached. If
+	// the player changed the selected Almanac entry, the previously selected
+	// live Plant has just died and its definition only becomes reclaimable on
+	// this later cached draw.
+	if ((aBuiltFrame && mApp->mGameScene == GameScenes::SCENE_LEVEL_INTRO) || mApp->mBoard == nullptr)
 		ReanimatorFreeUnusedDefinition(GetPlantDefinition(theSeedType).mReanimationType);
 #else
 	(void)aBuiltFrame;
 #endif
+
+	if (aImage == nullptr)
+		return;
 
 	int aOffsetX, aOffsetY, aWidth, aHeight;
 	GetPlantImageSize(theSeedType, aOffsetX, aOffsetY, aWidth, aHeight);
@@ -439,6 +527,8 @@ void ReanimatorCache::DrawCachedMower(Graphics* g, float thePosX, float thePosY,
 	
 	if (mLawnMowers[(int)theMowerType] == nullptr)
 		mLawnMowers[(int)theMowerType] = MakeCachedMowerFrame(theMowerType);
+	if (mLawnMowers[(int)theMowerType] == nullptr)
+		return;
 	TodDrawImageScaledF(g, mLawnMowers[(int)theMowerType], thePosX - 20.0f, thePosY, g->mScaleX, g->mScaleY);
 }
 
@@ -446,8 +536,40 @@ void ReanimatorCache::DrawCachedMower(Graphics* g, float thePosX, float thePosY,
 void ReanimatorCache::DrawCachedZombie(Graphics* g, float thePosX, float thePosY, ZombieType theZombieType)
 {
 	TOD_ASSERT(theZombieType >= 0 && theZombieType < ZombieType::NUM_CACHED_ZOMBIE_TYPES);
-	
+
+#ifdef LOW_MEMORY
+	if (mApp->mBoard == nullptr && mLowMemoryMenuCacheFamily != 2)
+	{
+		ReanimatorCachePurgePlants();
+		mLowMemoryMenuCacheFamily = 2;
+	}
+#endif
+
+	bool aBuiltFrame = false;
 	if (mZombieImages[(int)theZombieType] == nullptr)
+	{
 		mZombieImages[(int)theZombieType] = MakeCachedZombieFrame(theZombieType);
+		aBuiltFrame = mZombieImages[(int)theZombieType] != nullptr;
+	}
+
+#ifdef LOW_MEMORY
+	if (mApp->mBoard == nullptr)
+	{
+		ZombieType aDefinitionType = theZombieType == ZombieType::ZOMBIE_CACHED_POLEVAULTER_WITH_POLE ?
+			ZombieType::ZOMBIE_POLEVAULTER : theZombieType;
+		ReanimationType aReanimType = GetZombieDefinition(aDefinitionType).mReanimationType;
+		// Most accessory zombies share Zombie.reanim. Keep that one through
+		// the first build pass instead of decoding it once per thumbnail. On
+		// the next cached pass (aBuiltFrame == false) it is safe to reclaim too,
+		// unless the selected live zombie still pins it.
+		if (aReanimType != ReanimationType::REANIM_ZOMBIE || !aBuiltFrame)
+			ReanimatorFreeUnusedDefinition(aReanimType);
+	}
+#else
+	(void)aBuiltFrame;
+#endif
+
+	if (mZombieImages[(int)theZombieType] == nullptr)
+		return;
 	TodDrawImageScaledF(g, mZombieImages[(int)theZombieType], thePosX, thePosY, g->mScaleX, g->mScaleY);
 }

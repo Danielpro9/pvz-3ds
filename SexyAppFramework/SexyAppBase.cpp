@@ -30,14 +30,24 @@
 //#include "misc/HTTPTransfer.h"
 #include "widget/Dialog.h"
 #include "imagelib/ImageLib.h"
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM)
 #include "sound/DummySoundManager.h"
 #include "platform/ps2/sound/Ps2SoundManager.h"
 #include "platform/ps2/Ps2IoLock.h"
+#include "platform/ps2/Ps2BigArena.h"
 #include "platform/ps2/Ps2PvzServices.h"
 #include "platform/ps2/Ps2Trace.h"
 #include <malloc.h>
 #include <new>
+#elif defined(WII_PLATFORM)
+#include "sound/DummySoundManager.h"
+#include "platform/wii/sound/WiiSoundManager.h"
+#include "platform/wii/WiiEarlyInit.h"
+#include "platform/wii/WiiHeap.h"
+#include <malloc.h>
+#include <gccore.h>
+static inline void Ps2IoLockAcquire() {}
+static inline void Ps2IoLockRelease() {}
 #else
 #include "sound/SDLSoundManager.h"
 #include "sound/SDLSoundInstance.h"
@@ -49,7 +59,7 @@
 #include "misc/ModVal.h"
 //#include "graphics/SysFont.h"
 #include "misc/ResourceManager.h"
-#ifndef PS2_PLATFORM
+#if !defined(PS2_PLATFORM) && !defined(WII_PLATFORM)
 #include "sound/SDLMusicInterface.h"
 #endif
 #include "misc/AutoCrit.h"
@@ -2021,7 +2031,7 @@ void SexyAppBase::ReadFromRegistry()
 	if (mRegKey.length() == 0)
 		return;
 
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 	// Persist the emulated registry next to the save data (mass:/mc0:/cwd).
 	regemu::SetRegFile(GetAppDataFolder() + "registry.regemu");
 #else
@@ -2087,7 +2097,18 @@ bool SexyAppBase::WriteBytesToFile(const std::string& theFileName, const void *t
 	Ps2MixerIoPauseScope aMixerPause;
 #endif
 	MkDir(GetFileDir(theFileName));
+#ifdef WII_PLATFORM
+	// Never truncate the last good save in place. A reset or power loss while
+	// libfat is updating the file would otherwise leave a zero-length/partial
+	// profile. Write and flush a sibling first, then rotate it into place while
+	// retaining the previous generation as a recovery copy.
+	const std::string aTempName = theFileName + ".tmp";
+	const std::string aBackupName = theFileName + ".bak";
+	remove(aTempName.c_str());
+	FILE* aFP = fcaseopen(aTempName.c_str(), "w+b");
+#else
 	FILE* aFP = fcaseopen(theFileName.c_str(), "w+b");
+#endif
 
 	if (aFP == NULL)
 	{
@@ -2102,8 +2123,41 @@ bool SexyAppBase::WriteBytesToFile(const std::string& theFileName, const void *t
 		return false;
 	}
 
-	fwrite(theData, 1, theDataLen, aFP);
-	fclose(aFP);
+	bool aWriteSucceeded = fwrite(theData, 1, theDataLen, aFP) == theDataLen;
+	if (aWriteSucceeded)
+		aWriteSucceeded = fflush(aFP) == 0;
+#ifdef WII_PLATFORM
+	if (aWriteSucceeded)
+		aWriteSucceeded = fsync(fileno(aFP)) == 0;
+#endif
+	if (fclose(aFP) != 0)
+		aWriteSucceeded = false;
+
+#ifdef WII_PLATFORM
+	if (aWriteSucceeded)
+	{
+		remove(aBackupName.c_str());
+		const bool aHadOriginal = rename(theFileName.c_str(), aBackupName.c_str()) == 0;
+		if (rename(aTempName.c_str(), theFileName.c_str()) != 0)
+		{
+			if (aHadOriginal)
+				rename(aBackupName.c_str(), theFileName.c_str());
+			aWriteSucceeded = false;
+		}
+	}
+	if (!aWriteSucceeded)
+	{
+		remove(aTempName.c_str());
+		wiiLog("[WII][SAVE] write failed '%s' (%lu bytes)\n",
+		       theFileName.c_str(), theDataLen);
+		return false;
+	}
+	wiiLog("[WII][SAVE] committed '%s' (%lu bytes)\n",
+	       theFileName.c_str(), theDataLen);
+#else
+	if (!aWriteSucceeded)
+		return false;
+#endif
 
 	if (mRecordingDemoBuffer)
 	{
@@ -2165,7 +2219,26 @@ bool SexyAppBase::ReadBufferFromFile(const std::string& theFileName, Buffer* the
 	}
 	else
 	{
+#ifdef PS2_PLATFORM
+		// Same fio-vs-mixer hazard as WriteBytesToFile: savegame/profile reads
+		// (Board::LoadGame, PlayerInfo::LoadDetails) land here on the main
+		// thread with the mixer live; an overlapping fio RPC wedges the IOP on
+		// real hardware. Park for the whole open/read/close.
+		Ps2MixerIoPauseScope aMixerPause;
+#endif
 		PFILE* aFP = p_fopen(theFileName.c_str(), "rb");
+#ifdef WII_PLATFORM
+		// If power was lost after rotating the old file but before committing the
+		// new one, the backup is still a complete previous generation.
+		std::string aReadName = theFileName;
+		if (aFP == NULL)
+		{
+			aReadName = theFileName + ".bak";
+			aFP = p_fopen(aReadName.c_str(), "rb");
+			if (aFP != NULL)
+				wiiLog("[WII][SAVE] recovering '%s' from backup\n", theFileName.c_str());
+		}
+#endif
 
 		if (aFP == NULL)
 		{
@@ -2174,7 +2247,7 @@ bool SexyAppBase::ReadBufferFromFile(const std::string& theFileName, Buffer* the
 				WriteDemoTimingBlock();
 				mDemoBuffer.WriteNumBits(0, 1);
 				mDemoBuffer.WriteNumBits(DEMO_FILE_READ, 5);
-				mDemoBuffer.WriteNumBits(0, 1); // failure				
+				mDemoBuffer.WriteNumBits(0, 1); // failure
 			}
 
 			return false;
@@ -2226,6 +2299,11 @@ bool SexyAppBase::FileExists(const std::string& theFileName)
 	}
 	else
 	{
+#ifdef PS2_PLATFORM
+		// The probe open/close below is fio; TryLoadGame calls this on the
+		// main thread right as adventure starts, with the mixer live.
+		Ps2MixerIoPauseScope aMixerPause;
+#endif
 		PFILE* aFP = p_fopen(theFileName.c_str(), "rb");
 
 		if (mRecordingDemoBuffer)
@@ -2233,7 +2311,7 @@ bool SexyAppBase::FileExists(const std::string& theFileName)
 			WriteDemoTimingBlock();
 			mDemoBuffer.WriteNumBits(0, 1);
 			mDemoBuffer.WriteNumBits(DEMO_FILE_EXISTS, 5);
-			mDemoBuffer.WriteNumBits((aFP != NULL) ? 1 : 0, 1); 
+			mDemoBuffer.WriteNumBits((aFP != NULL) ? 1 : 0, 1);
 		}
 
 		if (aFP == NULL)		
@@ -2249,7 +2327,18 @@ bool SexyAppBase::EraseFile(const std::string& theFileName)
 	if (mPlayingDemoBuffer)
 		return true;
 
-	return remove(theFileName.c_str()) == 0;
+#ifdef PS2_PLATFORM
+	// remove() is a fio RPC; PreNewGame erases the old savegame on the main
+	// thread the moment adventure starts, with the mixer live.
+	Ps2MixerIoPauseScope aMixerPause;
+#endif
+	const bool aRemoved = remove(theFileName.c_str()) == 0;
+#ifdef WII_PLATFORM
+	// Deleted slots must not be resurrected by the interrupted-write recovery.
+	remove((theFileName + ".tmp").c_str());
+	remove((theFileName + ".bak").c_str());
+#endif
+	return aRemoved;
 }
 
 void SexyAppBase::SEHOccured()
@@ -2742,6 +2831,22 @@ bool SexyAppBase::DrawDirtyStuff()
 {
 	SEXY_AUTO_PERF("SexyAppBase::DrawDirtyStuff");
 	MTAutoDisallowRand aDisallowRand;
+#ifdef WII_PLATFORM
+	// One-shot, so no flood: does the very first frame get here at all, and does
+	// it come back out? "enter" with no "exit" pins the hang inside the draw.
+	static bool sFirstDrawLogged = false;
+	const bool aLogThisDraw = !sFirstDrawLogged;
+	if (aLogThisDraw)
+	{
+		sFirstDrawLogged = true;
+		wiiLog("[WII][DRAW] first DrawDirtyStuff enter\n");
+	}
+	struct WiiFirstDrawExit
+	{
+		bool mLog;
+		~WiiFirstDrawExit() { if (mLog) wiiLog("[WII][DRAW] first DrawDirtyStuff exit\n"); }
+	} aFirstDrawExit = { aLogThisDraw };
+#endif
 #ifdef PS2_PLATFORM
 	static int sPs2FirstDrawStage = 0;
 #endif
@@ -3940,13 +4045,19 @@ void SexyAppBase::StartLoadingThread()
 		mLoadingThreadStarted = true;
 		//_beginthread(LoadingThreadProcStub, 0, this);
 		pthread_t id;
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 		// PTE's default pthread stack is only 32KB (malloc'd from the heap).
 		// The loading thread runs libpng/JPEG/XML/vorbis decoding; overflowing
 		// that stack corrupts adjacent heap blocks and detonates much later.
 		pthread_attr_t anAttr;
 		pthread_attr_init(&anAttr);
-		pthread_attr_setstacksize(&anAttr, 1024 * 1024);
+		pthread_attr_setstacksize(&anAttr,
+#ifdef PS2_PLATFORM
+			1024 * 1024
+#else
+			512 * 1024
+#endif
+		);
 		pthread_create(&id, &anAttr, LoadingThreadProcStub, this);
 		pthread_attr_destroy(&anAttr);
 #else
@@ -4363,7 +4474,16 @@ bool SexyAppBase::Process(bool allowSleep)
 		
 		if (mUpdateAppState == UPDATESTATE_PROCESS_1)
 		{
-			if ((++mNonDrawCount < (int) ceil(10*mUpdateMultiplier)) || (!mLoaded))
+#ifdef PS2_PLATFORM
+			// Catch-up cap 5 (was 10): when a frame runs long the loop piles
+			// logic updates before the next draw; on the EE that snowballs
+			// (more updates -> longer frame -> more updates). Cap lower and
+			// let game time slip instead.
+			const int aMaxNonDraw = (int) ceil(5*mUpdateMultiplier);
+#else
+			const int aMaxNonDraw = (int) ceil(10*mUpdateMultiplier);
+#endif
+			if ((++mNonDrawCount < aMaxNonDraw) || (!mLoaded))
 			{
 				bool doUpdate = false;
 				
@@ -4568,6 +4688,30 @@ void SexyAppBase::DoMainLoop()
 			Ps2Trace(PS2_TRACE_FIRST_UPDATE);
 #endif
 		UpdateApp();
+#ifdef WII_PLATFORM
+		// Liveness tick, ~1/s to OSREPORT. The Wii equivalent of the PS2's
+		// border blink: when the screen is stuck it says whether the main loop
+		// is alive, whether anything is being DRAWN (mDrawCount), and whether
+		// the loading thread ever started -- which on this port only happens
+		// after TitleScreen::Draw sets mDrawnYet, so a rising loop count with a
+		// flat draw count localises the stall to the render path rather than to
+		// loading.
+		{
+			static DWORD sLastBeat = 0;
+			static int sLoops = 0;
+			++sLoops;
+			const DWORD aNow = SDL_GetTicks();
+			if (aNow - sLastBeat >= WII_LIVENESS_INTERVAL_MS)
+			{
+				sLastBeat = aNow;
+				wiiLog("[WII][BEAT] loops=%d draws=%d updates=%d nodraw=%d "
+					"loadThread=%d/%d\n",
+					sLoops, mDrawCount, mUpdateCount, mNonDrawCount,
+					(int)mLoadingThreadStarted, (int)mLoadingThreadCompleted);
+				sLoops = 0;
+			}
+		}
+#endif
 #ifdef PS2_PLATFORM
 		if (aPs2LoopFrame == 0 && mDrawCount == 0)
 			Ps2Trace(PS2_TRACE_FIRST_UPDATE_DONE);
@@ -4587,6 +4731,31 @@ bool SexyAppBase::UpdateAppStep(bool* updated)
 {
 	if (updated != NULL)
 		*updated = false;
+
+#ifdef WII_PLATFORM
+	// UpdateApp() spins here until an update actually happens, so this runs even
+	// when the [WII][BEAT] in DoMainLoop never does. Two readings matter:
+	//   * it keeps printing with state/acc frozen  => livelock, no update is
+	//     ever produced, and the printed fields say which branch refuses;
+	//   * it stops printing entirely               => a hard hang further in
+	//     (Process -> DrawDirtyStuff -> GX), and the last line is the state it
+	//     died in.
+	{
+		static DWORD sLastStepBeat = 0;
+		static int sSteps = 0;
+		++sSteps;
+		const DWORD aNow = SDL_GetTicks();
+		if (aNow - sLastStepBeat >= WII_LIVENESS_INTERVAL_MS)
+		{
+			sLastStepBeat = aNow;
+			wiiLog("[WII][STEP] n=%d state=%d upd=%d draw=%d nodraw=%d "
+				"pendDraw=%d acc=%d loaded=%d\n",
+				sSteps, mUpdateAppState, mUpdateCount, mDrawCount, mNonDrawCount,
+				(int)mHasPendingDraw, (int)mUpdateFTimeAcc, (int)mLoaded);
+			sSteps = 0;
+		}
+	}
+#endif
 
 	if (mExitToTop)
 		return false;
@@ -5112,7 +5281,12 @@ MusicInterface* SexyAppBase::CreateMusicInterface()
 {
 	if (mNoSoundNeeded)
 		return new DummyMusicInterface();
-#ifdef PS2_PLATFORM
+#if defined(WII_PLATFORM)
+	// Not a dummy like PS2's: the Wii stream is topped up from Update(), which
+	// UpdateFrames() calls once a frame. PS2 can afford a dummy here because
+	// its mixer thread pumps its own stream.
+	return new WiiMusicInterface();
+#elif defined(PS2_PLATFORM)
 	return new DummyMusicInterface();
 #else
 	return new SDLMusicInterface();
@@ -5212,13 +5386,36 @@ void SexyAppBase::Init()
 		strcat(aPath, "/");
 		SetAppDataFolder(aPath);
 	}
+#elif defined(WII_PLATFORM)
+	// The install directory, not getcwd. libfat chdir()s to the launch directory
+	// when the loader passed argv[0] (HBC, wiiload do; booting the .elf straight
+	// from Dolphin does not), so getcwd is the right answer only some of the
+	// time -- and when it is wrong, saves land somewhere unrelated to the card
+	// the assets came from. wiiGetAppDir() is resolved by probing for main.pak,
+	// so it is the same device in every launch path.
+	//
+	// This also keeps the log honest: WiiEarlyInit opens
+	// <install>/savedata/userdata/log.txt before main(), which is exactly what
+	// TodAssertInitForApp derives from this folder a moment later.
+	snprintf(aPath, sizeof(aPath), "%s/savedata/", wiiGetAppDir());
+	SetAppDataFolder(aPath);
 #else
 	getcwd(aPath, 512);
 	strcat(aPath, "/savedata/");
 	SetAppDataFolder(aPath);
 #endif
 
-	gPakInterface->AddPakFile("main.pak");
+#ifdef WII_PLATFORM
+	wiiHeapReport("before AddPakFile");
+#endif
+	const bool aPakAdded = gPakInterface->AddPakFile("main.pak");
+#ifdef WII_PLATFORM
+	wiiLog("[WII][PAK] AddPakFile=%d records=%u\n",
+	       aPakAdded ? 1 : 0, (unsigned)gPakInterface->mPakRecordMap.size());
+	wiiHeapReport("after AddPakFile");
+#else
+	(void)aPakAdded;
+#endif
 
 	// Create a message we can use to talk to ourselves inter-process
 	//mNotifyGameMessage = RegisterWindowMessage((__S("Notify") + StringToSexyString(mProdName)).c_str());
@@ -5367,6 +5564,8 @@ void SexyAppBase::Init()
 	if (mSoundManager == NULL)
 #ifdef PS2_PLATFORM
 		mSoundManager = new Ps2SoundManager();
+#elif defined(WII_PLATFORM)
+		mSoundManager = new WiiSoundManager();
 #else
 		mSoundManager = new SDLSoundManager();
 #endif
@@ -5519,7 +5718,7 @@ Sexy::GLImage* SexyAppBase::GetImage(const std::string& theFileName, bool commit
 
 	GLImage* anImage = new GLImage(mGLInterface);
 	anImage->mFilePath = theFileName;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_IMAGES
 	if (aLoadedImage->mBits == NULL &&
 		(aLoadedImage->mColorTable != NULL || aLoadedImage->mRGBBits != NULL))
 	{
@@ -5577,20 +5776,45 @@ bool SexyAppBase::LoadLazyImageBits(MemoryImage* theImage)
 		return theImage->mBits != NULL;
 	}
 
+	// No file to decode from: a valid lazy image always has a path, so this is
+	// either a runtime image with a stray mLazyUnloaded or a corrupted object.
+	// GetImage("") would just fail after probing every extension anyway.
+	if (theImage->mFilePath.empty())
+	{
+		printf("[LAZY] decode requested with empty path — dropped\n");
+		theImage->mLazyUnloaded = false;
+		Ps2IoLockRelease();
+		return false;
+	}
+
+	// Pin this image for the whole decode. The OOM fallbacks below
+	// (Ps2AllocImageBits / GetPNGImage -> PurgeLazyImages) iterate every image
+	// including this one; unpinned it matches the "mLazyUnloaded with a live
+	// texture" purge case and Remove3DData deletes its TextureData — the very
+	// object whose CreateTextures call is on the stack right now (this decode
+	// usually runs inside CheckCreateTextures). The writes CreateTextures does
+	// after returning then land on a freed chunk and corrupt the heap (seen as
+	// TLB misses inside __malloc_update_mallinfo on the next mallinfo walk).
+	bool aWasPinned = theImage->mLazyPinned;
+	theImage->mLazyPinned = true;
+
 	ImageLib::Image* aLoadedImage = ImageLib::GetImage(theImage->mFilePath, true);
 	if (aLoadedImage == NULL)
 	{
 		printf("[LAZY] decode FAILED '%s'\n", theImage->mFilePath.c_str());
 		theImage->mLazyUnloaded = false;
+		theImage->mLazyPinned = aWasPinned;
 		Ps2IoLockRelease();
 		return false;
 	}
 
 	int aWidth = aLoadedImage->GetWidth();
 	int aHeight = aLoadedImage->GetHeight();
+#if !defined(WII_PLATFORM) || WII_LOG_LEVEL >= 2
 	printf("[LAZY] decoded '%s' %dx%d\n", theImage->mFilePath.c_str(), aWidth, aHeight);
+#endif
 
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_IMAGES
 	if (aLoadedImage->mBits == NULL &&
 		(aLoadedImage->mColorTable != NULL || aLoadedImage->mRGBBits != NULL))
 	{
@@ -5608,17 +5832,34 @@ bool SexyAppBase::LoadLazyImageBits(MemoryImage* theImage)
 		// Not SetBits(): with mBits==NULL and matching dimensions SetBits would
 		// memcpy into a null buffer, and it would double-buffer the copy.
 		delete [] theImage->mBits;
-		theImage->mBits = new (std::nothrow) uint32_t[aSize + 1];
-		if (theImage->mBits == NULL)
+		theImage->mBits = NULL;
+#ifdef SEXY_COMPACT_IMAGES
+		if (aLoadedImage->mBitsHasCanarySlot)
 		{
-			printf("[LAZY] OOM decoding '%s' (%dx%d) — dropping decode\n",
-				theImage->mFilePath.c_str(), aWidth, aHeight);
-			delete aLoadedImage;
-			Ps2IoLockRelease();
-			PurgeLazyImageBits(true);
-			return false;
+			// The decoder allocated its 32-bit buffer with the +1 canary slot
+			// precisely so it can be adopted here. Copying instead needs a
+			// second w*h*4 contiguous block, which under fragmentation is the
+			// allocation that dies (options_menuback: the expansion succeeded
+			// and its duplicate failed).
+			theImage->mBits = aLoadedImage->mBits;
+			aLoadedImage->mBits = NULL;
 		}
-		memcpy(theImage->mBits, aLoadedImage->GetBits(), aSize * sizeof(uint32_t));
+		else
+#endif
+		{
+			theImage->mBits = new (std::nothrow) uint32_t[aSize + 1];
+			if (theImage->mBits == NULL)
+			{
+				printf("[LAZY] OOM decoding '%s' (%dx%d) — dropping decode\n",
+					theImage->mFilePath.c_str(), aWidth, aHeight);
+				delete aLoadedImage;
+				theImage->mLazyPinned = aWasPinned;
+				Ps2IoLockRelease();
+				PurgeLazyImageBits(true);
+				return false;
+			}
+			memcpy(theImage->mBits, aLoadedImage->GetBits(), aSize * sizeof(uint32_t));
+		}
 		theImage->mBits[aSize] = MEMORYCHECK_ID;
 		theImage->mWidth = aWidth;
 		theImage->mHeight = aHeight;
@@ -5632,9 +5873,25 @@ bool SexyAppBase::LoadLazyImageBits(MemoryImage* theImage)
 	}
 	delete aLoadedImage;
 
+	// mLazyUnloaded must drop before the recipe compose below: its GetBits()
+	// would otherwise recurse into this function.
 	theImage->mLazyUnloaded = false;
+
+	// Explicit resources.xml alpha companions (alphagrid=/alphaimage=) are
+	// re-applied on every decode, which is what lets these images stay
+	// purgeable instead of carrying a lifetime pin. Runs while the image is
+	// still pinned (line above the decode) so the compose's own allocations
+	// can't purge this image out from under us, and the compose's
+	// BitsChanged() lands before mLazyCleanCount is sealed so the image does
+	// not read as runtime-dirty.
+	if (!theImage->mLazyAlphaGridPath.empty() || !theImage->mLazyAlphaImagePath.empty())
+		ResourceManager::ReapplyLazyAlpha(theImage);
+
 	theImage->mLazyCleanCount = theImage->mBitsChangedCount;
+	theImage->mLazyPinned = aWasPinned;
+#if !defined(WII_PLATFORM) || WII_LOG_LEVEL >= 2
 	printf("[LAZY] committed '%s'\n", theImage->mFilePath.c_str());
+#endif
 
 	Ps2IoLockRelease();
 	return true;
@@ -5727,15 +5984,71 @@ void SexyAppBase::PurgeLazyImages()
 	printf("[LAZY] purged %d images\n", aPurged);
 }
 
+#ifdef WII_PLATFORM
+// Bytes the allocator could still hand out: free blocks already inside the heap,
+// plus the MEM2 arena it has not sbrk'd yet.
+static unsigned long WiiHeapFreeBytes()
+{
+	struct mallinfo mi = mallinfo();
+	return (unsigned long)mi.fordblks + (unsigned long)SYS_GetArena2Size();
+}
+
+// Can the allocator still PLACE a block of this size? Free bytes and placeable
+// bytes are different questions, and only the second one predicts a bad_alloc:
+// the crash that motivated this had 24.6MB free across 5280 blocks and still
+// could not satisfy 512KB, so every byte-count test below read "healthy" right
+// up to the throw. newlib's mallinfo exposes no largest-free-block, so probing
+// is the only direct answer. Allocating and immediately freeing returns the
+// block to the bin it came from, so the probe does not itself fragment
+// anything, and malloc is called directly to stay out of the operator new
+// rescue path (WiiHeap.cpp), which would recurse back into here.
+static bool WiiCanPlaceBlock(size_t theBytes)
+{
+	void* aProbe = malloc(theBytes);
+	if (aProbe == NULL)
+		return false;
+	free(aProbe);
+	return true;
+}
+
+// Below this the next decode is at risk, so the pressure valve opens.
+static const unsigned long kWiiPressureLine = 12ul << 20;
+
+// Contiguity equivalents of the line and the margin below. A full-screen 800x600
+// background expands to 1875KB, so losing the ability to place 1MB means the
+// next background is already unservable; the release figure carries the same
+// hysteresis in contiguous terms that kWiiPressureMargin carries in total bytes.
+static const size_t kWiiContiguousLine = 1ul << 20;
+static const size_t kWiiContiguousRelease = 4ul << 20;
+
+// ...and the valve keeps purging until it is this far ABOVE the line, not just
+// barely over it. Without the margin the valve stops the instant it clears the
+// threshold, the very next allocation drops back under, and the following
+// fault-in purges again — every lazy image redecoding on every use, which
+// presents as a hang rather than as slowness. The margin buys enough headroom
+// for a burst of decodes between purges.
+static const unsigned long kWiiPressureMargin = 4ul << 20;
+#endif
+
 // EE heap tops out around 26MB (32MB minus load address, ELF image and
 // stack); past ~23MB in use the next big decode can fail and a failed
 // allocation here is a hard freeze, not an error dialog.
 bool SexyAppBase::IsHeapUnderPressure()
 {
+#ifdef WII_PLATFORM
+	// Either kind of exhaustion counts: not enough bytes left at all, or enough
+	// bytes but nowhere to put a big one.
+	return WiiHeapFreeBytes() < kWiiPressureLine ||
+		!WiiCanPlaceBlock(kWiiContiguousLine);
+#else
 	struct mallinfo mi = mallinfo();
 	// 21MB, not 23: atlas creation needs ~1MB contiguous on top of the decode
 	// in flight, and by 23MB in use those allocations were already failing.
-	return (long)mi.uordblks > (21L << 20);
+	// The big-block arena (Ps2BigArena.h) reserved PS2_BIG_ARENA_BYTES out of
+	// the general heap's ceiling and its bytes are invisible to mallinfo, so
+	// the pressure line shifts down by the same amount to keep the margin.
+	return (long)mi.uordblks > (21L << 20) - (long)PS2_BIG_ARENA_BYTES;
+#endif
 }
 
 // Pressure valve: drop only the decoded CPU bits of lazy images but keep
@@ -5750,10 +6063,32 @@ int SexyAppBase::PurgeLazyImageBits(bool theForce)
 	Ps2IoLockAcquire();
 
 	int aPurged = 0;
+#ifdef WII_PLATFORM
+	int aChecked = 0;
+#endif
 	for (MemoryImageSet::iterator anItr = mMemoryImageSet.begin(); anItr != mMemoryImageSet.end(); ++anItr)
 	{
 		if (PurgeLazyImage(*anItr, true))
 			aPurged++;
+
+#ifdef WII_PLATFORM
+		// Purge just enough, not everything. A forced purge still empties the
+		// set — its callers (the decode OOM rescue) want every byte back — but
+		// the pressure valve stops once it is clear of the line by
+		// kWiiPressureMargin. Purging the whole set here is what turned one
+		// tight moment into a redecode treadmill.
+		//
+		// mallinfo() walks the free bins, so it is not free to call: sample it
+		// every 16 images. Counting iterations rather than successful purges
+		// keeps the sampling bounded when nothing in the set is purgeable.
+		// The stop test has to match the open test, or the valve opens on
+		// fragmentation and then closes again on the first sample because the
+		// byte count was never the problem -- purging 16 images and stopping.
+		if (!theForce && (++aChecked & 15) == 0 &&
+			WiiHeapFreeBytes() >= kWiiPressureLine + kWiiPressureMargin &&
+			WiiCanPlaceBlock(kWiiContiguousRelease))
+			break;
+#endif
 	}
 
 	Ps2IoLockRelease();
@@ -5761,6 +6096,51 @@ int SexyAppBase::PurgeLazyImageBits(bool theForce)
 	struct mallinfo mi = mallinfo();
 	printf("[LAZY] pressure purge: %d image bits freed, used=%.2fMB\n",
 		aPurged, (double)mi.uordblks / (1024.0 * 1024.0));
+
+	// Forensics: a forced purge that freed nothing means every big image is
+	// unpurgeable — name them (with why) so the cross-level residency leak is
+	// attributable. "dirty" = modified after decode (mBitsChangedCount drifted
+	// from mLazyCleanCount), the usual way a purgeable image gets stuck.
+	// Throttled; mCritSect is still held here so the set iteration is safe.
+	if (theForce && aPurged == 0)
+	{
+		static uint32_t sLastListTick = 0;
+		uint32_t aNow = SDL_GetTicks();
+		if (aNow - sLastListTick > 5000)
+		{
+			sLastListTick = aNow;
+			int aListed = 0;
+			for (MemoryImageSet::iterator anItr = mMemoryImageSet.begin(); anItr != mMemoryImageSet.end(); ++anItr)
+			{
+				MemoryImage* anImage = *anItr;
+				long aBytes = 0;
+				if (anImage->mBits != NULL)
+					aBytes += (long)anImage->mWidth * anImage->mHeight * 4;
+				if (anImage->mColorIndices != NULL)
+					aBytes += (long)anImage->mWidth * anImage->mHeight;
+#ifdef PS2_PLATFORM
+				if (anImage->mRGBBits != NULL)
+					aBytes += (long)anImage->mWidth * anImage->mHeight * 3;
+#endif
+				if (aBytes < (64L << 10))
+					continue;
+				const char* aWhy =
+					anImage->mFilePath.empty() ? "no-file" :
+					anImage->mLazyPinned ? "pinned" :
+					(anImage->mBitsChangedCount != anImage->mLazyCleanCount) ? "dirty" :
+					anImage->mLazyUnloaded ? "unloaded" : "other";
+				printf("[LAZY] resident %4ldKB %-8s '%s' (%dx%d)\n",
+					aBytes >> 10, aWhy,
+					anImage->mFilePath.empty() ? "(runtime)" : anImage->mFilePath.c_str(),
+					anImage->mWidth, anImage->mHeight);
+				if (++aListed >= 16)
+				{
+					printf("[LAZY] resident list truncated\n");
+					break;
+				}
+			}
+		}
+	}
 	return aPurged;
 }
 #else

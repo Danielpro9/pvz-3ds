@@ -1,18 +1,69 @@
 #include <SDL.h>
 
+#ifdef WII_PLATFORM
+#include "wii/gx_wii.h"
+#include "wii/WiiCursor.h"
+#else
 #include <GL/glew.h>
 #include <GL/glext.h>
+#endif
 
+#include "misc/SexyEndian.h" // vertex colours are packed byte-wise; see PackVertexColor
+#include "misc/SexyLog.h"
 #include "graphics/GLInterface.h"
 #include "graphics/GLImage.h"
 #include "SexyAppBase.h"
 #include "misc/AutoCrit.h"
 #include "misc/CritSect.h"
+#include "misc/BigBlockArena.h"
+#ifdef WII_PLATFORM
+#include "misc/GraphicsBlockArena.h" // arena stats for the failed-upload report
+#endif
 #include "graphics/Graphics.h"
 #include "graphics/MemoryImage.h"
+#ifdef WII_PLATFORM
+#include "widget/WidgetManager.h" // MarkAllDirty for the software-cursor overlay
+#include "wii/WiiEarlyInit.h"     // wiiLog for the wide-texture probe
+#endif
 
 #define MAX_VERTICES 16384
-#define GetColorFromTriVertex(theVertex, theColor) (theVertex.color?theVertex.color:theColor)
+// A TriVertex carries its own colour, and game code fills it from
+// Color::ToInt(), which packs A<<24|B<<16|G<<8|R -- the little-endian spelling
+// of the R,G,B,A bytes GL wants. Colours reaching here as a parameter have
+// already been through PackVertexColor below, so only the vertex's own value
+// needs converting. Leaving it unconverted is what tinted trails, particles and
+// the credits' triangles wrongly on big-endian while everything else was fixed.
+static inline uint32_t VertexColorToGL(uint32_t theToIntColor)
+{
+#if SEXY_BIG_ENDIAN
+	return __builtin_bswap32(theToIntColor);
+#else
+	return theToIntColor;
+#endif
+}
+
+#define GetColorFromTriVertex(theVertex, theColor) (theVertex.color?VertexColorToGL(theVertex.color):(theColor))
+
+// Vertex colours reach GL through glColorPointer(4, GL_UNSIGNED_BYTE, ...),
+// which reads four BYTES in R,G,B,A order. Packing them into a uint32 is
+// therefore byte-order dependent: the little-endian arm below lands in memory
+// as R,G,B,A, but those same shifts on a big-endian target land as A,B,G,R and
+// hand GL every channel reversed.
+//
+// The reversal is not merely a wrong tint. Alpha ends up taken from the blue
+// channel, so anything dark silently disappears: an opaque black fill (0,0,0,255)
+// packs to 0xFF000000, which big-endian spells FF 00 00 00, which GL reads as
+// alpha 0. That is why, before this, dark dialog text and the cutscene's black
+// backdrop drew nothing at all while light-coloured text still showed up (with
+// its red and blue swapped).
+static inline uint32_t PackVertexColor(int r, int g, int b, int a)
+{
+#if SEXY_BIG_ENDIAN
+	return ((uint32_t)r << 24) | ((uint32_t)g << 16) | ((uint32_t)b << 8) | (uint32_t)a;
+#else
+	return (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)a << 24);
+#endif
+}
 
 using namespace Sexy;
 
@@ -117,13 +168,63 @@ static void GfxAddVertices(const TriVertex arr[][3], int arrCount, unsigned int 
 }
 
 
-static void CopyImageToTexture8888(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
+// GetBits() is allowed to return NULL. Under LOW_MEMORY it re-decodes a lazily
+// unloaded image and expands the compact form into 32bpp, and both steps fail
+// soft when the heap has no contiguous room left -- see the "Fail soft" note in
+// MemoryImage::GetBits, which lists this texture upload among the callers that
+// supposedly tolerate NULL. The pixel loops below did not: they walked the null
+// pointer and took a DSI exception at DAR=0, which is a hard crash on console
+// rather than a dropped frame. It surfaces only after enough menu/level churn
+// has fragmented MEM2 to where a multi-megabyte expansion no longer fits.
+//
+// The pointer has to be fetched *after* the scratch allocation above, never
+// before: that allocation can itself trigger a rescue purge that frees exactly
+// these bits.
+static uint32_t* GetReadableBits(MemoryImage *theImage)
 {
-	uint32_t *aDest = new uint32_t[theDestPitch * theDestHeight];
+	uint32_t *aBits = theImage->GetBits();
+	if (aBits == NULL)
+	{
+		// Bounded: the caller retries every frame until memory frees up, and an
+		// unbounded log here would be its own failure mode.
+		static int aNumReported = 0;
+		if (aNumReported < 8)
+		{
+			aNumReported++;
+			// Report which pool ran dry, not just that one did. GetBits() tries
+			// the graphics arena first and falls back to the general heap, so
+			// the two figures say whether to grow WII_GRAPHICS_ARENA_BYTES or to
+			// go looking for what is holding the heap.
+			const int aNeededKB = (int)(((size_t)theImage->GetWidth() * theImage->GetHeight() * 4 + 1023) / 1024);
+#ifdef WII_PLATFORM
+			SexyLogPrintf("[GFX] texture upload skipped: no bits for %dx%d (needed %dKB, gfxArena largest=%uKB used=%uKB)\n",
+				theImage->GetWidth(), theImage->GetHeight(), aNeededKB,
+				(unsigned)(ConsoleGraphicsLargestFreeBytes() / 1024),
+				(unsigned)(ConsoleGraphicsUsedBytes() / 1024));
+#else
+			SexyLogPrintf("[GFX] texture upload skipped: no bits for %dx%d (needed %dKB)\n",
+				theImage->GetWidth(), theImage->GetHeight(), aNeededKB);
+#endif
+		}
+	}
+	return aBits;
+}
+
+static bool CopyImageToTexture8888(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
+{
+	ConsoleScratchBuffer aScratch((size_t)theDestPitch * theDestHeight * sizeof(uint32_t));
+	uint32_t *aDest = static_cast<uint32_t*>(aScratch.Data());
+	if (aDest == nullptr)
+		throw std::bad_alloc();
+	memset(aDest, 0, (size_t)theDestPitch * theDestHeight * sizeof(uint32_t));
 
 	if (theImage->mColorTable == NULL)
 	{
-		uint32_t *srcRow = (uint32_t*)theImage->GetBits() + offy * theImage->GetWidth() + offx;
+		uint32_t *aBits = GetReadableBits(theImage);
+		if (aBits == NULL)
+			return false;
+
+		uint32_t *srcRow = aBits + offy * theImage->GetWidth() + offx;
 		uint32_t *dstRow = aDest;
 
 		for(int y=0; y<theHeight; y++)
@@ -142,6 +243,9 @@ static void CopyImageToTexture8888(MemoryImage *theImage, int offx, int offy, in
 	}
 	else // palette
 	{
+		if (theImage->mColorIndices == NULL)
+			return false;
+
 		uint8_t *srcRow = (uint8_t*)theImage->mColorIndices + offy * theImage->GetWidth() + offx;
 		uint32_t *dstRow = aDest;
 		uint32_t *palette = (uint32_t*)theImage->mColorTable;
@@ -163,8 +267,8 @@ static void CopyImageToTexture8888(MemoryImage *theImage, int offx, int offy, in
 
 	if (bottomPad)
 	{
-		uint32_t *dstrow = aDest + (theDestPitch*theHeight);
-		memcpy(dstrow, dstrow-(theDestPitch*4), (theDestPitch*4));
+		for (int y = theHeight; y < theDestHeight; y++)
+			memcpy(aDest + theDestPitch * y, aDest + theDestPitch * (theHeight - 1), theDestPitch * sizeof(uint32_t));
 	}
 
 	if (create)
@@ -172,16 +276,24 @@ static void CopyImageToTexture8888(MemoryImage *theImage, int offx, int offy, in
 	else
 		glTexSubImage2D(GL_TEXTURE_2D, 0, offx, offy, theDestPitch, theDestHeight, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, aDest);
 
-	delete[] aDest;
+	return true;
 }
 
-static void CopyImageToTexture4444(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
+static bool CopyImageToTexture4444(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
 {
-	uint16_t *aDest = new uint16_t[theDestPitch * theDestHeight];
+	ConsoleScratchBuffer aScratch((size_t)theDestPitch * theDestHeight * sizeof(uint16_t));
+	uint16_t *aDest = static_cast<uint16_t*>(aScratch.Data());
+	if (aDest == nullptr)
+		throw std::bad_alloc();
+	memset(aDest, 0, (size_t)theDestPitch * theDestHeight * sizeof(uint16_t));
 
 	if (theImage->mColorTable == NULL)
 	{
-		uint32_t *srcRow = (uint32_t*)theImage->GetBits() + offy * theImage->GetWidth() + offx;
+		uint32_t *aBits = GetReadableBits(theImage);
+		if (aBits == NULL)
+			return false;
+
+		uint32_t *srcRow = aBits + offy * theImage->GetWidth() + offx;
 		uint16_t *dstRow = aDest;
 
 		for(int y=0; y<theHeight; y++)
@@ -203,6 +315,9 @@ static void CopyImageToTexture4444(MemoryImage *theImage, int offx, int offy, in
 	}
 	else // palette
 	{
+		if (theImage->mColorIndices == NULL)
+			return false;
+
 		uint8_t *srcRow = (uint8_t*)theImage->mColorIndices + offy * theImage->GetWidth() + offx;
 		uint16_t *dstRow = aDest;
 		uint32_t *palette = (uint32_t*)theImage->mColorTable;
@@ -227,25 +342,61 @@ static void CopyImageToTexture4444(MemoryImage *theImage, int offx, int offy, in
 
 	if (bottomPad)
 	{
-		uint16_t *dstrow = aDest + (theDestPitch*theHeight);
-		memcpy(dstrow, dstrow-(theDestPitch*2), (theDestPitch*2));
+		for (int y = theHeight; y < theDestHeight; y++)
+			memcpy(aDest + theDestPitch * y, aDest + theDestPitch * (theHeight - 1), theDestPitch * sizeof(uint16_t));
 	}
 
+	// The internalformat is a request for how the driver should STORE the
+	// texture, and this function has just quantised every channel to 4 bits.
+	// GL_RGBA promises 8 bits per channel and then hands over data that no
+	// longer has them: the loss is taken and none of the storage is saved.
+	//
+	// That is not academic on Wii. opengx picks its GX format from the
+	// internalformat alone (_ogx_gl_format_to_gx), so GL_RGBA mapped to
+	// GX_TF_RGBA8 and every texture was allocated at 4 bytes/texel -- which made
+	// WII_TEXTURE_RGB5A3=1, whose whole purpose is to route images through this
+	// function, cost quality and save nothing. GL_RGBA4 maps to GX_TF_RGB5A3 and
+	// halves the allocation.
+	//
+	// Guarded rather than applied everywhere so the desktop build keeps the
+	// bytes it has today. The condition mirrors the one that strips
+	// PixelFormat_A8R8G8B8 in Init(): both exist to serve WII_TEXTURE_RGB5A3, so
+	// they stay spelled the same and turn off together. GL_RGBA4 would be the
+	// more honest request on desktop too -- the pixels really are 4-bit by the
+	// time they get here -- but that is a change to a working build for a VRAM
+	// saving nobody asked for.
+	//
+	// The pixel data is identical either way: format and type below still
+	// describe the same 4-4-4-4 bytes, so only storage differs.
+#if defined(WII_PLATFORM) && WII_TEXTURE_RGB5A3
+	const GLint anInternalFormat = GL_RGBA4;
+#else
+	const GLint anInternalFormat = GL_RGBA;
+#endif
+
 	if (create)
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, theDestPitch, theDestHeight, 0, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, aDest);
+		glTexImage2D(GL_TEXTURE_2D, 0, anInternalFormat, theDestPitch, theDestHeight, 0, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, aDest);
 	else
 		glTexSubImage2D(GL_TEXTURE_2D, 0, offx, offy, theDestPitch, theDestHeight, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, aDest);
 
-	delete[] aDest;
+	return true;
 }
 
-static void CopyImageToTexture565(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
+static bool CopyImageToTexture565(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
 {
-	uint16_t *aDest = new uint16_t[theDestPitch * theDestHeight];
+	ConsoleScratchBuffer aScratch((size_t)theDestPitch * theDestHeight * sizeof(uint16_t));
+	uint16_t *aDest = static_cast<uint16_t*>(aScratch.Data());
+	if (aDest == nullptr)
+		throw std::bad_alloc();
+	memset(aDest, 0, (size_t)theDestPitch * theDestHeight * sizeof(uint16_t));
 
 	if (theImage->mColorTable == NULL)
 	{
-		uint32_t *srcRow = (uint32_t*)theImage->GetBits() + offy * theImage->GetWidth() + offx;
+		uint32_t *aBits = GetReadableBits(theImage);
+		if (aBits == NULL)
+			return false;
+
+		uint32_t *srcRow = aBits + offy * theImage->GetWidth() + offx;
 		uint16_t *dstRow = aDest;
 
 		for(int y=0; y<theHeight; y++)
@@ -267,6 +418,9 @@ static void CopyImageToTexture565(MemoryImage *theImage, int offx, int offy, int
 	}
 	else
 	{
+		if (theImage->mColorIndices == NULL)
+			return false;
+
 		uint8_t *srcRow = (uint8_t*)theImage->mColorIndices + offy * theImage->GetWidth() + offx;
 		uint16_t *dstRow = aDest;
 		uint32_t *palette = (uint32_t*)theImage->mColorTable;
@@ -291,8 +445,8 @@ static void CopyImageToTexture565(MemoryImage *theImage, int offx, int offy, int
 
 	if (bottomPad)
 	{
-		uint16_t *dstrow = aDest + (theDestPitch*theHeight);
-		memcpy(dstrow, dstrow-(theDestPitch*2), (theDestPitch*2));
+		for (int y = theHeight; y < theDestHeight; y++)
+			memcpy(aDest + theDestPitch * y, aDest + theDestPitch * (theHeight - 1), theDestPitch * sizeof(uint16_t));
 	}
 
 	if (create)
@@ -300,19 +454,26 @@ static void CopyImageToTexture565(MemoryImage *theImage, int offx, int offy, int
 	else
 		glTexSubImage2D(GL_TEXTURE_2D, 0, offx, offy, theDestPitch, theDestHeight, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, aDest);
 
-	delete[] aDest;
+	return true;
 }
 
-static void CopyImageToTexturePalette8(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
+static bool CopyImageToTexturePalette8(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
 {
 	printf("PALETTE %d %d - %d %d - %d %d\n", offx, offy, theWidth, theHeight, theDestPitch, theDestHeight);
 	fflush(stdout);
 
-	uint32_t *aDest = new uint32_t[theDestPitch * theDestHeight];
+	ConsoleScratchBuffer aScratch((size_t)theDestPitch * theDestHeight * sizeof(uint32_t));
+	uint32_t *aDest = static_cast<uint32_t*>(aScratch.Data());
+	if (aDest == nullptr)
+		throw std::bad_alloc();
+	memset(aDest, 0, (size_t)theDestPitch * theDestHeight * sizeof(uint32_t));
+
+	if (theImage->mColorIndices == NULL || theImage->mColorTable == NULL)
+		return false;
 
 	uint8_t *srcRow = (uint8_t*)theImage->mColorIndices + offy * theImage->GetWidth() + offx;
 	uint32_t *dstRow = aDest;
-	uint16_t *palette = (uint16_t*)theImage->mColorTable;
+	uint32_t *palette = theImage->mColorTable;
 
 	for(int y=0; y<theHeight; y++)
 	{
@@ -333,8 +494,8 @@ static void CopyImageToTexturePalette8(MemoryImage *theImage, int offx, int offy
 
 	if (bottomPad)
 	{
-		uint32_t *dstrow = aDest + (theDestPitch*theHeight);
-		memcpy(dstrow, dstrow-(theDestPitch*4), (theDestPitch*4));
+		for (int y = theHeight; y < theDestHeight; y++)
+			memcpy(aDest + theDestPitch * y, aDest + theDestPitch * (theHeight - 1), theDestPitch * sizeof(uint32_t));
 	}
 
 	if (create)
@@ -342,12 +503,14 @@ static void CopyImageToTexturePalette8(MemoryImage *theImage, int offx, int offy
 	else
 		glTexSubImage2D(GL_TEXTURE_2D, 0, offx, offy, theDestPitch, theDestHeight, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, aDest);
 
-	delete[] aDest;
+	return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
-static void CopyImageToTexture(MemoryImage *theImage, int offx, int offy, int texWidth, int texHeight, PixelFormat theFormat, bool create)
+// Returns false when the source pixels could not be obtained, leaving the
+// texture piece untouched. Callers must not treat the piece as uploaded.
+static bool CopyImageToTexture(MemoryImage *theImage, int offx, int offy, int texWidth, int texHeight, PixelFormat theFormat, bool create)
 {
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (gLinearFilter) ? GL_LINEAR : GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (gLinearFilter) ? GL_LINEAR : GL_NEAREST);
@@ -365,13 +528,15 @@ static void CopyImageToTexture(MemoryImage *theImage, int offx, int offy, int te
 	{
 		switch (theFormat)
 		{
-			case PixelFormat_A8R8G8B8:	CopyImageToTexture8888(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create); break;
-			case PixelFormat_A4R4G4B4:	CopyImageToTexture4444(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create); break;
-			case PixelFormat_R5G6B5:	CopyImageToTexture565(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create); break;
-			case PixelFormat_Palette8:	CopyImageToTexturePalette8(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create); break;
+			case PixelFormat_A8R8G8B8:	return CopyImageToTexture8888(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create);
+			case PixelFormat_A4R4G4B4:	return CopyImageToTexture4444(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create);
+			case PixelFormat_R5G6B5:	return CopyImageToTexture565(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create);
+			case PixelFormat_Palette8:	return CopyImageToTexturePalette8(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create);
 			case PixelFormat_Unknown: break;
 		}
 	}
+
+	return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -662,12 +827,52 @@ void TextureData::CreateTextures(MemoryImage *theImage)
 			TextureDataPiece &aPiece = mTextures[i];
 			if (createTextures)
 			{
+			#ifdef WII_PLATFORM
+				// Texture 0 is OpenGX's permanently reserved default object.  If
+				// glGenTextures runs out of names it leaves our zero-initialized id
+				// untouched, so never upload into (and leak storage on) object 0.
+				while (glGetError() != GL_NO_ERROR) {}
+			#endif
 				glGenTextures(1, &aPiece.mTexture);
+			#ifdef WII_PLATFORM
+				if (aPiece.mTexture == 0 || glGetError() == GL_OUT_OF_MEMORY)
+				{
+					ReleaseTextures();
+					mPixelFormat = PixelFormat_Unknown;
+					return;
+				}
+			#endif
 				mTexMemSize += aPiece.mWidth*aPiece.mHeight*aFormatSize;
 			}
 			glBindTexture(GL_TEXTURE_2D, aPiece.mTexture);
 
-			CopyImageToTexture(theImage,x,y,aPiece.mWidth,aPiece.mHeight,aFormat, createTextures);
+		#ifdef WII_PLATFORM
+			// Attribute a following OOM to this upload, not to an unrelated GL
+			// call made earlier in the frame.
+			while (glGetError() != GL_NO_ERROR) {}
+		#endif
+			// A NULL source is recoverable in exactly the same way as a GL
+			// allocation failure: drop the whole attempt and leave the format
+			// Unknown so CheckCreateTextures retries once memory frees up.
+			// Keeping half-uploaded pieces would leave the image permanently
+			// wrong, since mBitsChangedCount below would mark it as current.
+			if (!CopyImageToTexture(theImage,x,y,aPiece.mWidth,aPiece.mHeight,aFormat, createTextures))
+			{
+				ReleaseTextures();
+				mPixelFormat = PixelFormat_Unknown;
+				return;
+			}
+#ifdef WII_PLATFORM
+			// OpenGX reports allocation failure through GL_OUT_OF_MEMORY. Tear
+			// down every piece made by this attempt; keeping earlier pieces while
+			// marking the TextureData unknown caused partial retries and leaks.
+			if (glGetError() == GL_OUT_OF_MEMORY)
+			{
+				ReleaseTextures();
+				mPixelFormat = PixelFormat_Unknown;
+				return;
+			}
+#endif
 		}
 	}
 
@@ -675,6 +880,7 @@ void TextureData::CreateTextures(MemoryImage *theImage)
 	mHeight = theImage->mHeight;
 	mBitsChangedCount = theImage->mBitsChangedCount;
 	mPixelFormat = aFormat;
+
 }
 	
 ///////////////////////////////////////////////////////////////////////////////
@@ -778,7 +984,7 @@ void TextureData::Blt(float theX, float theY, const Rect& theSrcRect, const Colo
 	srcY = srcTop;
 	dstY = theY;
 
-	uint32_t aColor = (theColor.mRed << 0) | (theColor.mGreen << 8) | (theColor.mBlue << 16) | (theColor.mAlpha << 24);
+	uint32_t aColor = PackVertexColor(theColor.mRed, theColor.mGreen, theColor.mBlue, theColor.mAlpha);
 
 	if ((srcLeft >= srcRight) || (srcTop >= srcBottom))
 		return;
@@ -857,7 +1063,7 @@ static inline GLVertex Interpolate(const GLVertex &v1, const GLVertex &v2, float
 		int g = ((v1.color >> 8) & 0xff) + t*( ((v2.color >> 8) & 0xff) - ((v1.color >> 8) & 0xff) );
 		int b = ((v1.color >> 16) & 0xff) + t*( ((v2.color >> 16) & 0xff) - ((v1.color >> 16) & 0xff) );
 		int a = ((v1.color >> 24) & 0xff) + t*( ((v2.color >> 24) & 0xff) - ((v1.color >> 24) & 0xff) );
-		aVertex.color = (r << 0) | (g << 8) | (b << 16) | (a << 24);
+		aVertex.color = PackVertexColor(r, g, b, a);
 	}
 
 	return aVertex;
@@ -981,7 +1187,7 @@ void TextureData::BltTransformed(const SexyMatrix3 &theTrans, const Rect& theSrc
 	srcY = srcTop;
 	dstY = starty;
 
-	uint32_t aColor = (theColor.mRed << 0) | (theColor.mGreen << 8) | (theColor.mBlue << 16) | (theColor.mAlpha << 24);
+	uint32_t aColor = PackVertexColor(theColor.mRed, theColor.mGreen, theColor.mBlue, theColor.mAlpha);
 
 	if ((srcLeft >= srcRight) || (srcTop >= srcBottom))
 		return;
@@ -1180,9 +1386,13 @@ GLInterface::GLInterface(SexyAppBase* theApp)
 
 	mPresentationRect = Rect( 0, 0, mWidth, mHeight );
 
+#ifdef WII_PLATFORM
+	mRefreshRate = 60;
+#else
 	SDL_DisplayMode aMode;
 	SDL_GetCurrentDisplayMode(SDL_GetWindowDisplayIndex((SDL_Window*)mApp->mWindow), &aMode);
 	mRefreshRate = aMode.refresh_rate;
+#endif
 	if (!mRefreshRate) mRefreshRate = 60;
 	mMillisecondsPerFrame = 1000/mRefreshRate;
 
@@ -1269,7 +1479,12 @@ void GLInterface::UpdateViewport()
 	int viewport_x = 0;
 	int viewport_y = 0;
 
+#ifdef WII_PLATFORM
+	width = wiigl_width();
+	height = wiigl_height();
+#else
 	SDL_GL_GetDrawableSize((SDL_Window*)mApp->mWindow, &width, &height);
+#endif
 
 	glClear(GL_COLOR_BUFFER_BIT);
 	Flush();
@@ -1299,8 +1514,10 @@ int GLInterface::Init(bool IsWindowed)
 	if (!inited)
 	{
 		inited = true;
+#ifndef WII_PLATFORM
 		glewExperimental = GL_TRUE;
 		const GLenum glewInitResult = glewInit();
+#endif
 	}
 
 	int aMaxSize;
@@ -1316,6 +1533,12 @@ int GLInterface::Init(bool IsWindowed)
 	gMaxTextureWidth = aMaxSize;
 	gMaxTextureHeight = aMaxSize;
 	gSupportedPixelFormats = PixelFormat_A8R8G8B8 | PixelFormat_A4R4G4B4 | PixelFormat_R5G6B5 | PixelFormat_Palette8;
+#if defined(WII_PLATFORM) && WII_TEXTURE_RGB5A3
+	// GX RGB5A3 preserves alpha at half the storage/bandwidth of RGBA8. By not
+	// advertising the 32-bit format, the existing format chooser selects its
+	// A4R4G4B4 path, which OpenGX maps to GX_TF_RGB5A3.
+	gSupportedPixelFormats &= ~PixelFormat_A8R8G8B8;
+#endif
 	gLinearFilter = false;
 
 	glMatrixMode(GL_MODELVIEW);
@@ -1349,9 +1572,34 @@ int GLInterface::Init(bool IsWindowed)
 	return 1;
 }
 
+#ifdef WII_PLATFORM
+// Defined in platform/wii/Input.cpp: pointer position in screen coordinates.
+// Global namespace, matching how the PS2 backend declares its equivalent.
+void WiiGetCursorState(float& theX, float& theY, float& theRotation);
+
+#endif
+
 bool GLInterface::Redraw(Rect* theClipRect)
 {
+#ifdef WII_PLATFORM
+	// glViewport is already the presentation rect (UpdateViewport), so the
+	// ortho box below is its size, with the origin at its top-left.
+	float aCursorX = 0.0f;
+	float aCursorY = 0.0f;
+	float aCursorRotation = 0.0f;
+	WiiGetCursorState(aCursorX, aCursorY, aCursorRotation);
+	WiiCursorDraw(aCursorX, aCursorY, aCursorRotation,
+		mPresentationRect.mWidth, mPresentationRect.mHeight);
+#endif
 	Flush();
+#ifdef WII_PLATFORM
+	// Widgets normally repaint only their dirty rectangles. The cursor is an
+	// overlay on top of a double-buffered frame, so anything it covered stays
+	// smeared into the buffer it is not repainted in -- the trail of arrows the
+	// PS2 backend hit for the same reason. Force a full repaint each frame.
+	if (mApp && mApp->mWidgetManager)
+		mApp->mWidgetManager->MarkAllDirty();
+#endif
 	return true;
 }
 
@@ -1385,19 +1633,24 @@ bool GLInterface::PreDraw()
 void GLInterface::Flush()
 {
 	gNumVertices = 0;
+#ifdef WII_PLATFORM
+	wiigl_end_frame();
+	wiigl_begin_frame();
+#else
 	SDL_GL_SwapWindow((SDL_Window*)mApp->mWindow);
+#endif
 }
 
 bool GLInterface::CreateImageTexture(MemoryImage *theImage)
 {
-	bool wantPurge = false;
+	// Re-evaluate this on every attempt.  Previously it was captured only
+	// while allocating TextureData, so a failed first upload both purged the
+	// only CPU copy and prevented a later successful retry from purging it.
+	bool wantPurge = theImage->mPurgeBits;
 
 	if(theImage->mD3DData==NULL)
 	{
 		theImage->mD3DData = new TextureData();
-		
-		// The actual purging was deferred
-		wantPurge = theImage->mPurgeBits;
 
 		AutoCrit aCrit(mCritSect); // Make images thread safe
 		mImageSet.insert(theImage);
@@ -1405,15 +1658,29 @@ bool GLInterface::CreateImageTexture(MemoryImage *theImage)
 
 	TextureData *aData = (TextureData*)theImage->mD3DData;
 	aData->CheckCreateTextures(theImage);
-	
-	if (wantPurge)
+
+	const bool uploadSucceeded = aData->mPixelFormat != PixelFormat_Unknown;
+	// A runtime cache image has no file to reload and Wii has no glGetTexImage.
+	// Purging it after GL_OUT_OF_MEMORY made a transient failure permanently
+	// transparent.  Keep the pixels intact so the next frame can retry.
+	if (uploadSucceeded && wantPurge)
 		theImage->PurgeBits();
 
-	return aData->mPixelFormat != PixelFormat_Unknown;
+	return uploadSucceeded;
 }
 
 bool GLInterface::RecoverBits(MemoryImage* theImage)
 {
+#ifdef WII_PLATFORM
+	// OpenGX has no glGetTexImage, so a GPU readback is not available at all.
+	// Returning false lets the normal resource reload path handle it.
+	//
+	// (LOW_MEMORY *is* on for Wii -- see CMakeLists -- so bits do get purged and
+	// lazily re-decoded here. An earlier version of this comment claimed the
+	// opposite; anything relying on pixels staying resident is wrong.)
+	(void)theImage;
+	return false;
+#else
 	if (theImage->mD3DData == NULL)
 		return false;
 
@@ -1455,6 +1722,7 @@ bool GLInterface::RecoverBits(MemoryImage* theImage)
 	}
 
 	return true;
+#endif
 }
 
 void GLInterface::PushTransform(const SexyMatrix3 &theTransform, bool concatenate)
@@ -1619,10 +1887,21 @@ void GLInterface::DrawLine(double theStartX, double theStartY, double theEndX, d
 
 	glDisable(GL_TEXTURE_2D);
 
+	// PackVertexColor, not Color::ToInt(): ToInt() packs A<<24|B<<16|G<<8|R,
+	// which is only the R,G,B,A byte order glColorPointer wants on a
+	// little-endian CPU. This call site and FillRect below were the two that
+	// still passed it through raw, so on Wii they took their alpha from the red
+	// channel -- opaque black (0,0,0,255) packs to 0xFF000000, spelled
+	// FF 00 00 00 on big-endian, i.e. alpha 0. Every dark outline drawn with
+	// DrawRect (which lowers to these edges) was invisible while light fills
+	// were fine, since white is 0xFFFFFFFF either way.
+	const uint32_t aColor = PackVertexColor(theColor.mRed, theColor.mGreen,
+	                                        theColor.mBlue, theColor.mAlpha);
+
 	GLVertex aVertex[3] = {
-		{ {x1},{y1},{0},{theColor.ToInt()},{0},{0} },
-		{ {x2},{y2},{0},{theColor.ToInt()},{0},{0} },
-		{ {x2+0.5f},{y2+0.5f},{0},{theColor.ToInt()},{0},{0} },
+		{ {x1},{y1},{0},{aColor},{0},{0} },
+		{ {x2},{y2},{0},{aColor},{0},{0} },
+		{ {x2+0.5f},{y2+0.5f},{0},{aColor},{0},{0} },
 	};
 
 	GfxBegin(GL_LINE_STRIP);
@@ -1642,11 +1921,15 @@ void GLInterface::FillRect(const Rect& theRect, const Color& theColor, int theDr
 	float aWidth = theRect.mWidth;
 	float aHeight = theRect.mHeight;
 
+	// See the note in DrawLine: raw ToInt() is the little-endian byte order only.
+	const uint32_t aFillColor = PackVertexColor(theColor.mRed, theColor.mGreen,
+	                                            theColor.mBlue, theColor.mAlpha);
+
 	GLVertex aVertex[4] = {
-		{ {x},        {y},         {0},{theColor.ToInt()},{0},{0} },
-		{ {x},        {y+aHeight}, {0},{theColor.ToInt()},{0},{0} },
-		{ {x+aWidth}, {y},         {0},{theColor.ToInt()},{0},{0} },
-		{ {x+aWidth}, {y+aHeight}, {0},{theColor.ToInt()},{0},{0} }
+		{ {x},        {y},         {0},{aFillColor},{0},{0} },
+		{ {x},        {y+aHeight}, {0},{aFillColor},{0},{0} },
+		{ {x+aWidth}, {y},         {0},{aFillColor},{0},{0} },
+		{ {x+aWidth}, {y+aHeight}, {0},{aFillColor},{0},{0} }
 	};
 
 	if (!mTransformStack.empty())
@@ -1678,7 +1961,7 @@ void GLInterface::DrawTriangle(const TriVertex &p1, const TriVertex &p2, const T
 
 	SetDrawMode(theDrawMode);
 
-	unsigned int aColor = (theColor.mRed << 0) | (theColor.mGreen << 8) | (theColor.mBlue << 16) | (theColor.mAlpha << 24);
+	unsigned int aColor = PackVertexColor(theColor.mRed, theColor.mGreen, theColor.mBlue, theColor.mAlpha);
 	unsigned int col1 = GetColorFromTriVertex(p1, aColor);
 	unsigned int col2 = GetColorFromTriVertex(p1, aColor);
 	unsigned int col3 = GetColorFromTriVertex(p1, aColor);
@@ -1717,7 +2000,7 @@ void GLInterface::DrawTrianglesTex(const TriVertex theVertices[][3], int theNumT
 
 	SetLinearFilter(blend);
 
-	unsigned int aColor = (theColor.mRed << 0) | (theColor.mGreen << 8) | (theColor.mBlue << 16) | (theColor.mAlpha << 24);
+	unsigned int aColor = PackVertexColor(theColor.mRed, theColor.mGreen, theColor.mBlue, theColor.mAlpha);
 	aData->BltTriangles(theVertices, theNumTriangles, aColor, tx, ty);
 }
 
@@ -1748,7 +2031,7 @@ void GLInterface::FillPoly(const Point theVertices[], int theNumVertices, const 
 		return;
 
 	SetDrawMode(theDrawMode);
-	unsigned int aColor = (theColor.mRed << 0) | (theColor.mGreen << 8) | (theColor.mBlue << 16) | (theColor.mAlpha << 24);
+	unsigned int aColor = PackVertexColor(theColor.mRed, theColor.mGreen, theColor.mBlue, theColor.mAlpha);
 
 	glDisable(GL_TEXTURE_2D);
 

@@ -2,11 +2,48 @@
 #include "Common.h"
 #include "PakInterface.h"
 #include "fcaseopen/fcaseopen.h"
+// The PopCap pak format stores its multibyte directory fields little-endian,
+// so every one of them goes through SexyLE* on the way in.
+#include "misc/SexyEndian.h"
 #ifdef PS2_PLATFORM
 #include "Ps2IoLock.h"
 #include "Ps2AssetIndex.h"
+#include "platform/ps2/Ps2BigArena.h" // big pak records buffer in the reserved arena
+#include "SexyAppBase.h" // purge-rescue for the per-record buffer malloc
 #include <cstdlib> // malloc/free for per-record buffering
 #include <map>     // shared pak read-handle cache
+#endif
+
+#ifdef WII_PLATFORM
+#include <cstdlib>   // malloc/free for per-record buffering
+#include <map>       // shared pak read-handle cache
+#include <pthread.h> // serializes seek+read on the shared handle
+
+// One persistent read handle per pak collection, opened on first use and kept
+// for the life of the app — the same fix the PS2 branch above carries, and for
+// the same reason: FOpen used to fcaseopen + fclose main.pak for EVERY record it
+// served, and a load opens thousands of them (the ResourceManager probes several
+// extensions per image, and every reanim/XML/compiled file is another open). On
+// libfat each of those opens is a FAT directory walk of the volume root.
+//
+// One difference from PS2 matters: PS2 funnels all file IO through Ps2IoLock, so
+// its helper inherits that serialization for free. The Wii has no such global
+// lock and DOES run a loading thread concurrently with the main thread's
+// lazy-image fault-in (LoadLazyImageBits), so a shared FILE* here needs its own
+// mutex — otherwise one thread's fseek lands in the middle of another's fread
+// and both get the wrong bytes. Callers must hold sWiiPakHandleMutex across the
+// whole seek+read and must NOT fclose the handle.
+static pthread_mutex_t sWiiPakHandleMutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Call with sWiiPakHandleMutex held: it guards the map as well as the handle.
+static FILE* WiiGetSharedPakHandle(PakCollection* theCollection, const char* thePath)
+{
+	static std::map<PakCollection*, FILE*> sPakHandles;
+	FILE*& aFP = sPakHandles[theCollection];
+	if (aFP == NULL)
+		aFP = fcaseopen(thePath, "rb");
+	return aFP;
+}
 #endif
 
 typedef unsigned char uchar;
@@ -152,8 +189,8 @@ static void FixFileName(const char* theFileName, char* theUpperName)
 
 bool PakInterface::AddPakFile(const std::string& theFileName)
 {
-#ifdef PS2_PLATFORM
-	// PS2: stream from disk instead of loading 44 MB into 32 MB RAM.
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	// Consoles: stream from disk instead of permanently loading the whole pak.
 	// Parse the directory header now, then keep the pak path so each
 	// FOpen() can open a private file handle for concurrent-safe reads.
 	FILE* f = fcaseopen(theFileName.c_str(), "rb");
@@ -168,9 +205,13 @@ bool PakInterface::AddPakFile(const std::string& theFileName)
 	};
 
 	uint32_t aMagic = 0;
-	if (!xread(&aMagic, 4) || aMagic != 0xBAC04AC0) { fclose(f); return false; }
+	if (!xread(&aMagic, 4)) { fclose(f); return false; }
+	aMagic = SexyLE32(aMagic);
+	if (aMagic != 0xBAC04AC0) { fclose(f); return false; }
 	uint32_t aVersion = 0;
-	if (!xread(&aVersion, 4) || aVersion > 0)        { fclose(f); return false; }
+	if (!xread(&aVersion, 4)) { fclose(f); return false; }
+	aVersion = SexyLE32(aVersion);
+	if (aVersion > 0) { fclose(f); return false; }
 
 	mPakCollectionList.emplace_back(0);
 	PakCollection* aPakCollection = &mPakCollectionList.back();
@@ -197,6 +238,8 @@ bool PakInterface::AddPakFile(const std::string& theFileName)
 		int64_t aFileTime = 0;
 		if (!xread(&aSrcSize, sizeof(int))) break;
 		if (!xread(&aFileTime, sizeof(int64_t))) break;
+		aSrcSize = (int)SexyLE32((uint32_t)aSrcSize);
+		aFileTime = (int64_t)SexyLE64((uint64_t)aFileTime);
 
 		for (int i = 0; i < aNameWidth; i++)
 			if (aName[i] == '\\') aName[i] = '/';
@@ -226,7 +269,7 @@ bool PakInterface::AddPakFile(const std::string& theFileName)
 			kv.second.mStartPos += anOffset;
 	}
 
-	printf("[PvZ PS2] AddPakFile '%s': %d records, data_start=%d\n",
+	printf("[PvZ] AddPakFile '%s': %d records, data_start=%d\n",
 		theFileName.c_str(), aRecordCount, anOffset);
 	// Print a few sample keys so we can verify the format
 	{
@@ -240,7 +283,7 @@ bool PakInterface::AddPakFile(const std::string& theFileName)
 
 	return true;
 
-#else // !PS2_PLATFORM
+#else // PC-style in-memory pak
 
 	/*
 	HANDLE aFileHandle = CreateFile(theFileName.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
@@ -306,6 +349,7 @@ bool PakInterface::AddPakFile(const std::string& theFileName)
 
 	uint32_t aMagic = 0;
 	FRead(&aMagic, sizeof(uint32_t), 1, aFP);
+	aMagic = SexyLE32(aMagic);
 	if (aMagic != 0xBAC04AC0)
 	{
 		FClose(aFP);
@@ -314,6 +358,7 @@ bool PakInterface::AddPakFile(const std::string& theFileName)
 
 	uint32_t aVersion = 0;
 	FRead(&aVersion, sizeof(uint32_t), 1, aFP);
+	aVersion = SexyLE32(aVersion);
 	if (aVersion > 0)
 	{
 		FClose(aFP);
@@ -338,6 +383,8 @@ bool PakInterface::AddPakFile(const std::string& theFileName)
 		FRead(&aSrcSize, sizeof(int), 1, aFP);
 		int64_t aFileTime;
 		FRead(&aFileTime, sizeof(int64_t), 1, aFP);
+		aSrcSize = (int)SexyLE32((uint32_t)aSrcSize);
+		aFileTime = (int64_t)SexyLE64((uint64_t)aFileTime);
 
 		for (int i=0; i<aNameWidth; i++)
 		{
@@ -374,7 +421,7 @@ bool PakInterface::AddPakFile(const std::string& theFileName)
 	FClose(aFP);
 
 	return true;
-#endif // PS2_PLATFORM
+#endif
 }
 
 //0x5D85C0
@@ -384,6 +431,24 @@ PFILE* PakInterface::FOpen(const char* theFileName, const char* anAccess)
 	{
 		char anUpperName[256];
 		FixFileName(theFileName, anUpperName);
+
+#ifdef WII_PLATFORM
+		// PC-authored compiled definitions in main.pak are not ABI-compatible
+		// with big-endian PowerPC. Once Wii has compiled a native cache beside
+		// the ELF, prefer that loose file over the pak entry on later loads.
+		if (strncasecmp(theFileName, "compiled/", 9) == 0)
+		{
+			FILE* aNativeCache = fcaseopen(theFileName, anAccess);
+			if (aNativeCache != NULL)
+			{
+				PFILE* aLoosePFile = new PFILE;
+				aLoosePFile->mRecord = NULL;
+				aLoosePFile->mPos = 0;
+				aLoosePFile->mFP = aNativeCache;
+				return aLoosePFile;
+			}
+		}
+#endif
 
 #ifdef PS2_PLATFORM
 		static int sFOpenDbg = 0;
@@ -416,7 +481,33 @@ PFILE* PakInterface::FOpen(const char* theFileName, const char* anAccess)
 				anItr->second.mFileName.c_str(), aSize, anItr->second.mStartPos);
 			fflush(stdout); // ensure the record name is visible even if the read hangs
 			Ps2IoLockRelease();
-			unsigned char* aBuffer = (unsigned char*)malloc(aSize > 0 ? aSize : 1);
+			// Big records buffer in the reserved arena so a 300KB+ read never
+			// competes with general-heap fragmentation; the free() wrap routes
+			// the pointer back to the arena when p_fclose releases it.
+			unsigned char* aBuffer = NULL;
+			if ((unsigned int)aSize >= PS2_BIG_ALLOC_THRESHOLD)
+				aBuffer = (unsigned char*)Ps2BigAlloc((unsigned int)aSize);
+			if (aBuffer == NULL)
+				aBuffer = (unsigned char*)malloc(aSize > 0 ? aSize : 1);
+			if (aBuffer == NULL && Sexy::gSexyAppBase != NULL)
+			{
+				// Raw malloc has no purge-rescue (the operator-new wrap never
+				// sees it). A big record on a fragmented heap dies here first
+				// — BACKGROUND1.PNG after a few levels — and the streaming
+				// fallback then needs the same contiguous block for its
+				// staging copy, so shed purgeable image bits and retry, then
+				// textures too.
+				Sexy::gSexyAppBase->PurgeLazyImageBits(true);
+				if ((unsigned int)aSize >= PS2_BIG_ALLOC_THRESHOLD)
+					aBuffer = (unsigned char*)Ps2BigAlloc((unsigned int)aSize);
+				if (aBuffer == NULL)
+					aBuffer = (unsigned char*)malloc(aSize > 0 ? aSize : 1);
+				if (aBuffer == NULL)
+				{
+					Sexy::gSexyAppBase->PurgeLazyImages();
+					aBuffer = (unsigned char*)malloc(aSize > 0 ? aSize : 1);
+				}
+			}
 			if (aBuffer != NULL)
 			{
 				// Shared persistent handle: one open for the app's lifetime
@@ -453,6 +544,42 @@ PFILE* PakInterface::FOpen(const char* theFileName, const char* anAccess)
 				Ps2IoLockRelease();
 			}
 			// Fallback: if buffering failed, keep a streaming handle open.
+			if (aPFP->mBuffer == NULL)
+				aPFP->mFP = fcaseopen(anItr->second.mCollection->mPakPath.c_str(), "rb");
+#elif defined(WII_PLATFORM)
+			// Keep only the currently-open resource in memory. This avoids the
+			// permanent ~40 MB main.pak copy that exhausted Wii's MEM2 heap.
+			aPFP->mFP = NULL;
+			aPFP->mBuffer = NULL;
+			const int aSize = anItr->second.mSize;
+			unsigned char* aBuffer = (unsigned char*)malloc(aSize > 0 ? (size_t)aSize : 1u);
+			if (aBuffer != NULL)
+			{
+				// Shared handle instead of a per-record open/close; the lock has
+				// to span seek+read, not just the lookup. See the comment on
+				// WiiGetSharedPakHandle.
+				pthread_mutex_lock(&sWiiPakHandleMutex);
+				FILE* f = WiiGetSharedPakHandle(anItr->second.mCollection,
+					anItr->second.mCollection->mPakPath.c_str());
+				size_t aRead = 0;
+				if (f != NULL)
+				{
+					fseek(f, anItr->second.mStartPos, SEEK_SET);
+					aRead = fread(aBuffer, 1, (size_t)aSize, f);
+				}
+				pthread_mutex_unlock(&sWiiPakHandleMutex);
+
+				// Decrypt outside the lock: it is CPU work on a private buffer,
+				// and for a multi-MB record it would otherwise block the other
+				// thread's reads for the whole XOR pass.
+				if (f != NULL && aRead == (size_t)aSize)
+				{
+					for (size_t i = 0; i < aRead; ++i) aBuffer[i] ^= 0xF7;
+					aPFP->mBuffer = aBuffer;
+				}
+				else free(aBuffer);
+			}
+			// Low-memory fallback reads and decrypts directly from a private handle.
 			if (aPFP->mBuffer == NULL)
 				aPFP->mFP = fcaseopen(anItr->second.mCollection->mPakPath.c_str(), "rb");
 #else
@@ -499,6 +626,11 @@ int PakInterface::FClose(PFILE* theFile)
 		fclose(theFile->mFP);
 		Ps2IoLockRelease();
 	}
+#elif defined(WII_PLATFORM)
+	if (theFile->mBuffer != NULL)
+		free(theFile->mBuffer);
+	if (theFile->mFP != NULL)
+		fclose(theFile->mFP);
 #else
 	if (theFile->mRecord == NULL)
 		fclose(theFile->mFP);
@@ -559,7 +691,11 @@ size_t PakInterface::FRead(void* thePtr, int theElemSize, int theCount, PFILE* t
 {
 	if (theFile->mRecord != NULL)
 	{
-		int aSizeBytes = std::min(theElemSize*theCount, theFile->mRecord->mSize - theFile->mPos);
+		if (theElemSize <= 0 || theCount <= 0)
+			return 0;
+		const size_t aRequested = (size_t)theElemSize * (size_t)theCount;
+		const size_t aRemaining = (size_t)std::max(theFile->mRecord->mSize - theFile->mPos, 0);
+		const size_t aSizeBytes = std::min(aRequested, aRemaining);
 #ifdef PS2_PLATFORM
 		if (theFile->mBuffer != NULL)
 		{
@@ -577,6 +713,21 @@ size_t PakInterface::FRead(void* thePtr, int theElemSize, int theCount, PFILE* t
 		size_t bytesRead = Ps2ChunkedFRead(thePtr, (size_t)aSizeBytes, f, true);
 		uchar* p = (uchar*)thePtr;
 		for (size_t i = 0; i < bytesRead; i++) p[i] ^= 0xF7;
+		theFile->mPos += (int)bytesRead;
+		return bytesRead / (size_t)theElemSize;
+#elif defined(WII_PLATFORM)
+		if (theFile->mBuffer != NULL)
+		{
+			memcpy(thePtr, theFile->mBuffer + theFile->mPos, aSizeBytes);
+			theFile->mPos += aSizeBytes;
+			return aSizeBytes / theElemSize;
+		}
+		FILE* f = theFile->mFP;
+		if (f == NULL) return 0;
+		fseek(f, theFile->mRecord->mStartPos + theFile->mPos, SEEK_SET);
+		size_t bytesRead = fread(thePtr, 1, (size_t)aSizeBytes, f);
+		uchar* p = (uchar*)thePtr;
+		for (size_t i = 0; i < bytesRead; ++i) p[i] ^= 0xF7;
 		theFile->mPos += (int)bytesRead;
 		return bytesRead / (size_t)theElemSize;
 #else
@@ -605,7 +756,7 @@ int PakInterface::FGetC(PFILE* theFile)
 		{
 			if (theFile->mPos >= theFile->mRecord->mSize)
 				return EOF;
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 			uchar aChar = 0;
 			if (FRead(&aChar, 1, 1, theFile) != 1) return EOF;
 			if (aChar != '\r') return (uchar)aChar;
@@ -645,7 +796,7 @@ char* PakInterface::FGetS(char* thePtr, int theSize, PFILE* theFile)
 					return NULL;
 				break;
 			}
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 			uchar aChar = 0;
 			if (FRead(&aChar, 1, 1, theFile) != 1) break;
 #else

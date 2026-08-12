@@ -55,6 +55,18 @@ static volatile int s_mixerLoadPause = 0;
 // any audsrv RPC. Ps2MixerIoPauseBegin waits for this so a caller never starts
 // fio with an audsrv RPC still in flight.
 static volatile int s_mixerParked = 0;
+// Consecutive parked loop passes (mixer thread only). Distinguishes a real
+// starvation park (loading screens: hundreds of chunks) from the micro-parks
+// the log writer takes around every line (~1-3 chunks); only the former needs
+// the audsrv re-arm below.
+static volatile int s_mixerParkedChunks = 0;
+// ~1s of parked chunks before the unpark re-inits audsrv. The re-arm exists
+// for multi-second SPU2 starvation; running it after every micro-park meant
+// hundreds of gratuitous stop/format/volume RPC bursts during log-heavy
+// scenes (the credits), each one a fresh chance for audsrv to wedge mid-RPC —
+// after which every pause-begin times out and the next fio collides on the
+// IOP: total freeze with silence, log ending at the last completed line.
+#define PS2_MIX_REINIT_PARK_CHUNKS 20
 // Liveness diagnostics, read by Ps2MixerHealthTick on the main thread. Beat
 // increments once per loop pass (park spins included); spot records the phase
 // the mixer entered last, so a frozen beat pinpoints WHERE it is stuck.
@@ -224,6 +236,7 @@ static void Ps2MixerThread(void*)
         {
             s_mixerSpot = PS2_MIXSPOT_PARKED;
             s_mixerParked = 1;  // no audsrv RPC can be in flight from here on
+            s_mixerParkedChunks++;
             usleep(PS2_MIX_CHUNK * 1000000 / PS2_MIX_RATE);
             continue;
         }
@@ -239,14 +252,23 @@ static void Ps2MixerThread(void*)
             // waits on it, and seeing it still set would let fio RPCs collide
             // with this re-init on real hardware. No printf here: fio RPCs are
             // unsafe from the mixer thread.
+            //
+            // Only after a LONG park (see PS2_MIX_REINIT_PARK_CHUNKS): the ring
+            // rides out micro-parks on its own buffering, and re-arming audsrv
+            // hundreds of times per scene is itself a wedge vector.
+            int aParkedChunks = s_mixerParkedChunks;
+            s_mixerParkedChunks = 0;
             s_mixerParked = 0;
-            audsrv_stop_audio();
-            audsrv_fmt_t fmt;
-            fmt.freq = PS2_MIX_RATE;
-            fmt.bits = 16;
-            fmt.channels = 2;
-            audsrv_set_format(&fmt);
-            audsrv_set_volume(MAX_VOLUME);
+            if (aParkedChunks >= PS2_MIX_REINIT_PARK_CHUNKS)
+            {
+                audsrv_stop_audio();
+                audsrv_fmt_t fmt;
+                fmt.freq = PS2_MIX_RATE;
+                fmt.bits = 16;
+                fmt.channels = 2;
+                audsrv_set_format(&fmt);
+                audsrv_set_volume(MAX_VOLUME);
+            }
         }
 
         s_mixerSpot = PS2_MIXSPOT_MIX;
@@ -387,8 +409,11 @@ void Sexy::Ps2MixerIoPauseBegin()
     if (s_mixerRun && s_mixerThreadId >= 0)
     {
         // Typical wait is one chunk (~46ms); bounded so a wedged mixer can't
-        // hang the caller forever.
-        for (int aTries = 0; aTries < 100 && !s_mixerParked; aTries++)
+        // hang the caller forever. Generous (~1s) on purpose: timing out and
+        // proceeding into fio with an audsrv RPC still in flight is exactly
+        // the IOP collision this park exists to prevent, so only a truly
+        // wedged mixer should ever let a caller through unparked.
+        for (int aTries = 0; aTries < 500 && !s_mixerParked; aTries++)
             usleep(2000);
     }
 }

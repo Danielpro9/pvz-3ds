@@ -12,8 +12,20 @@ extern bool gOptimizeSoftwareDrawing;
 // their pixels are decoded from the pak on first GetBits(); decoded bits (and
 // the GS texture) can later be purged at screen transitions and re-decode on
 // the next use. Only enabled on PS2 (32 MB); other targets load eagerly.
-#ifdef PS2_PLATFORM
+// Not optional on the targets below, despite reading like a tuning knob: the
+// dangling-Image guard in ReanimatorFreeUnusedDefinitions keys off this macro,
+// so a build that clears it while still running the asset cleaner re-arms the
+// use-after-free that guard prevents.
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 #define SEXY_LAZY_IMAGES
+#endif
+
+// Compact (paletted) image forms -- see the full rationale on the twin
+// definition in imagelib/ImageLib.h. Repeated here rather than included because
+// it gates virtual members below: every translation unit must agree on it or
+// the vtable differs. Both spellings derive from the same compiler -D flags.
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#define SEXY_COMPACT_IMAGES
 #endif
 
 namespace Sexy
@@ -63,6 +75,15 @@ public:
 	bool					mLazyPinned;
 	int						mLazyCleanCount;
 	DWORD					mLazyRestoreD3DFlags;
+	// Recipe for an explicit resources.xml alpha companion (alphaimage= /
+	// alphagrid=). LoadLazyImageBits re-applies it after every re-decode, so
+	// these images stay purgeable; without the recipe they had to be
+	// mLazyPinned forever (the adventure's zombie-note letters are ~750KB
+	// each and accumulated as unpurgeable residents across the session).
+	std::string				mLazyAlphaImagePath;
+	std::string				mLazyAlphaGridPath;
+	int						mLazyAlphaRows;
+	int						mLazyAlphaCols;
 
 private:
 	void					Init();
@@ -110,7 +131,7 @@ public:
 
 	virtual void			Clear();
 	virtual void			SetBits(uint32_t* theBits, int theWidth, int theHeight, bool commitBits = true);
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_IMAGES
 	virtual void			SetCompactBits(uint32_t* theColorTable, uchar* theColorIndices, uchar* theRGBBits, int theWidth, int theHeight, bool hasTrans, bool hasAlpha, bool commitBits = true);
 	virtual void			AdoptCompactBits(uint32_t* theColorTable, uchar* theColorIndices, uchar* theRGBBits, int theWidth, int theHeight, bool hasTrans, bool hasAlpha, bool commitBits = true);
 #endif

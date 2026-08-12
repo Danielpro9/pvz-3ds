@@ -33,6 +33,10 @@ const char* Ps2GetResourcePrefix(void);
 // True if the embedded audsrv module loaded (sound is available).
 bool Ps2AudioAvailable(void);
 
+// True if the USB mouse driver (ps2mouse.irx) loaded and its RPC server
+// bound; Input.cpp only polls the mouse when this holds.
+bool Ps2MouseAvailable(void);
+
 #ifdef __cplusplus
 }
 #endif

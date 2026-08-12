@@ -28,13 +28,14 @@ SeedChooserScreen::SeedChooserScreen()
 	mApp = (LawnApp*)gSexyAppBase;
 	mBoard = mApp->mBoard;
 	mClip = false;
-	// mSeedChooserAge = 0;  原版并没有初始化 mSeedChooserAge
+	// mSeedChooserAge = 0;  鍘熺増骞舵病鏈夊垵濮嬪寲 mSeedChooserAge
 	mSeedsInFlight = 0;
 	mSeedsInBank = 0;
 	mLastMouseX = -1;
 	mLastMouseY = -1;
 	mChooseState = CHOOSE_NORMAL;
 	mViewLawnTime = 0;
+	mKeyboardSeed = SEED_NONE;
 	mToolTip = new ToolTipWidget();
 	mToolTipSeed = -1;
 
@@ -405,6 +406,23 @@ void SeedChooserScreen::Draw(Graphics* g)
 			}
 			DrawSeedPacket(g, aPosX, aPosY, aChosenSeed.mSeedType, aChosenSeed.mImitaterType, 0, aGrayed ? 115 : 255, true, false);
 		}
+	}
+
+	// Keep D-Pad focus visible independently of the IR cursor.
+	if (HasKeyboardSelection())
+	{
+		ChosenSeed& aFocusedSeed = mChosenSeeds[mKeyboardSeed];
+		int aFocusX = aFocusedSeed.mX;
+		int aFocusY = aFocusedSeed.mY;
+		if (aFocusedSeed.mSeedState == SEED_IN_BANK)
+		{
+			aFocusX -= mX;
+			aFocusY -= mY;
+		}
+		Graphics aFocusG(*g);
+		aFocusG.SetColor(Color(255, 240, 64));
+		aFocusG.DrawRect(aFocusX - 2, aFocusY - 2, SEED_PACKET_WIDTH + 3, SEED_PACKET_HEIGHT + 3);
+		aFocusG.DrawRect(aFocusX - 1, aFocusY - 1, SEED_PACKET_WIDTH + 1, SEED_PACKET_HEIGHT + 1);
 	}
 
 	mImitaterButton->Draw(g);
@@ -1135,6 +1153,73 @@ void SeedChooserScreen::CloseSeedChooser()
 void SeedChooserScreen::KeyDown(KeyCode theKey)
 {
 	mBoard->DoTypingCheck(theKey);
+	if (mChooseState != CHOOSE_NORMAL || mApp->GetDialogCount() > 0)
+		return;
+
+	int aStep = 0;
+	if (theKey == KEYCODE_LEFT)       aStep = -1;
+	else if (theKey == KEYCODE_RIGHT) aStep = 1;
+	else if (theKey == KEYCODE_UP)    aStep = -8;
+	else if (theKey == KEYCODE_DOWN)  aStep = 8;
+
+	if (aStep != 0)
+	{
+		// Arrange the first step to land on seed zero regardless of direction;
+		// the availability filter below then finds the nearest usable packet.
+		int aSeed = HasKeyboardSelection() ? mKeyboardSeed : -aStep;
+		for (int i = 0; i < NUM_SEEDS_IN_CHOOSER; i++)
+		{
+			aSeed = (aSeed + aStep) % NUM_SEEDS_IN_CHOOSER;
+			if (aSeed < 0) aSeed += NUM_SEEDS_IN_CHOOSER;
+			ChosenSeed& aChosenSeed = mChosenSeeds[aSeed];
+			if (mApp->SeedTypeAvailable((SeedType)aSeed) &&
+				aChosenSeed.mSeedState != SEED_PACKET_HIDDEN &&
+				aChosenSeed.mSeedState != SEED_FLYING_TO_BANK &&
+				aChosenSeed.mSeedState != SEED_FLYING_TO_CHOOSER)
+			{
+				mKeyboardSeed = aSeed;
+				mApp->PlaySample(Sexy::SOUND_GRAVEBUTTON);
+				MarkDirty();
+				break;
+			}
+		}
+		return;
+	}
+
+	if ((theKey == KEYCODE_RETURN || theKey == KEYCODE_SPACE) && HasKeyboardSelection())
+	{
+		ChosenSeed& aChosenSeed = mChosenSeeds[mKeyboardSeed];
+		SeedType aSeedType = (SeedType)mKeyboardSeed;
+		if (SeedNotAllowedToPick(aSeedType) || SeedNotAllowedDuringTrial(aSeedType))
+		{
+			mApp->PlaySample(Sexy::SOUND_BUZZER);
+			return;
+		}
+		if (aChosenSeed.mSeedState == SEED_IN_BANK)
+		{
+			if (aChosenSeed.mCrazyDavePicked)
+			{
+				mApp->PlaySample(Sexy::SOUND_BUZZER);
+				mToolTip->FlashWarning();
+			}
+			else ClickedSeedInBank(aChosenSeed);
+		}
+		else if (aChosenSeed.mSeedState == SEED_IN_CHOOSER)
+			ClickedSeedInChooser(aChosenSeed);
+	}
+}
+
+bool SeedChooserScreen::HasKeyboardSelection() const
+{
+	return mKeyboardSeed >= SEED_PEASHOOTER && mKeyboardSeed < NUM_SEEDS_IN_CHOOSER;
+}
+
+void SeedChooserScreen::ClearKeyboardSelection()
+{
+	if (!HasKeyboardSelection())
+		return;
+	mKeyboardSeed = SEED_NONE;
+	MarkDirty();
 }
 
 //0x486EA0

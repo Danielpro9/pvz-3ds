@@ -12,6 +12,7 @@ namespace Sexy
 {
 
 class WidgetManager;
+class ResourceGroupLease;
 
 typedef std::vector<Color> ColorVector;
 
@@ -36,8 +37,10 @@ public:
 	static bool				mWriteColoredString;  // controls whether ^color^ works in calls to WriteString	
 
 	std::vector<std::string> mLoadedResourceNames; // headshot2017: for unloading resources on destructor
+	std::vector<ResourceGroupLease*> mResourceGroupLeases;
 
 	void					WidgetRemovedHelper();
+	bool					AcquireResourceGroup(const std::string& theGroup);
 
 public:
 	Widget();

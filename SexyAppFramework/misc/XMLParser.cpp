@@ -64,11 +64,13 @@ bool XMLParser::AddAttribute(XMLElement* theElement, const SexyString& theAttrib
 bool XMLParser::GetAsciiChar(wchar_t* theChar, bool* error)
 {
 	(void)error;
-	wchar_t aChar = 0;
+	// Never fread a byte directly into wchar_t: on big-endian PowerPC it lands
+	// in the most-significant byte (e.g. '<' becomes 0x3c000000).
+	unsigned char aChar = 0;
 	if (p_fread(&aChar, 1, 1, mFile) != 1)
 		return false;
 
-	*theChar = aChar;
+	*theChar = (wchar_t)aChar;
 	return true;
 }
 
@@ -83,9 +85,10 @@ bool XMLParser::GetUTF8Char(wchar_t* theChar, bool* error)
 	};
 	*error = true;
 
-	int aTempChar = 0;
-	if (p_fread(&aTempChar, 1, 1, mFile) == 1)
+	unsigned char aFirstByte = 0;
+	if (p_fread(&aFirstByte, 1, 1, mFile) == 1)
 	{
+		int aTempChar = (int)aFirstByte;
 		if ((aTempChar & 0x80) != 0)
 		{
 			if ((aTempChar & 0xC0) != 0xC0) return false; // sanity check: high bit should not be set without the next highest bit being set too.
@@ -110,7 +113,9 @@ bool XMLParser::GetUTF8Char(wchar_t* theChar, bool* error)
 			int anExtraChar = 0;
 			while (aLen > 0)
 			{
-				if (p_fread(&anExtraChar, 1, 1, mFile) != 1) return false;
+				unsigned char anExtraByte = 0;
+				if (p_fread(&anExtraByte, 1, 1, mFile) != 1) return false;
+				anExtraChar = (int)anExtraByte;
 				if ((anExtraChar & 0xC0) != 0x80) return false; // sanity check: high bit set, and next highest bit NOT set.
 
 				*aBytesReadPtr++ = anExtraChar;

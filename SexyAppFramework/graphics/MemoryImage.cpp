@@ -9,9 +9,11 @@
 #include "misc/Debug.h"
 #include "Quantize.h"
 #include "misc/PerfTimer.h"
+#include "misc/GraphicsBlockArena.h"
 #include "SWTri.h"
 
 #include <math.h>
+#include <new>
 
 using namespace Sexy;
 
@@ -57,6 +59,8 @@ MemoryImage::MemoryImage(const MemoryImage& theMemoryImage) :
 	mLazyPinned = true;
 	mLazyCleanCount = 0;
 	mLazyRestoreD3DFlags = 0;
+	mLazyAlphaRows = 1;
+	mLazyAlphaCols = 1;
 	bool aSourceWasLazy = theMemoryImage.mLazyUnloaded;
 
 	MemoryImage* aNonConstMemoryImage = (MemoryImage*) &theMemoryImage;
@@ -195,6 +199,8 @@ void MemoryImage::Init()
 	mLazyPinned = false;
 	mLazyCleanCount = 0;
 	mLazyRestoreD3DFlags = 0;
+	mLazyAlphaRows = 1;
+	mLazyAlphaCols = 1;
 
 	mApp->AddMemoryImage(this);
 }
@@ -1282,7 +1288,7 @@ void MemoryImage::SetBits(uint32_t* theBits, int theWidth, int theHeight, bool c
 	}
 }
 
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_IMAGES
 void MemoryImage::SetCompactBits(uint32_t* theColorTable, uchar* theColorIndices, uchar* theRGBBits, int theWidth, int theHeight, bool hasTrans, bool hasAlpha, bool commitBits)
 {
 	delete [] mBits;
@@ -1291,8 +1297,14 @@ void MemoryImage::SetCompactBits(uint32_t* theColorTable, uchar* theColorIndices
 	mColorTable = NULL;
 	delete [] mColorIndices;
 	mColorIndices = NULL;
+#ifdef PS2_PLATFORM
 	delete [] mRGBBits;
 	mRGBBits = NULL;
+#else
+	// Only PS2 has an upload path that can read 24-bit RGB; everywhere else the
+	// decoder never produces it, so the parameter is always NULL here.
+	(void)theRGBBits;
+#endif
 
 	mWidth = theWidth;
 	mHeight = theHeight;
@@ -1314,12 +1326,14 @@ void MemoryImage::SetCompactBits(uint32_t* theColorTable, uchar* theColorIndices
 			mColorIndices = NULL;
 		}
 	}
+#ifdef PS2_PLATFORM
 	else if (theRGBBits != NULL)
 	{
 		mRGBBits = new uchar[mWidth * mHeight * 3];
 		if (mRGBBits != NULL)
 			memcpy(mRGBBits, theRGBBits, mWidth * mHeight * 3);
 	}
+#endif
 
 	mHasTrans = hasTrans;
 	mHasAlpha = hasAlpha;
@@ -1336,8 +1350,10 @@ void MemoryImage::AdoptCompactBits(uint32_t* theColorTable, uchar* theColorIndic
 	mColorTable = NULL;
 	delete [] mColorIndices;
 	mColorIndices = NULL;
+#ifdef PS2_PLATFORM
 	delete [] mRGBBits;
 	mRGBBits = NULL;
+#endif
 
 	mWidth = theWidth;
 	mHeight = theHeight;
@@ -1346,10 +1362,19 @@ void MemoryImage::AdoptCompactBits(uint32_t* theColorTable, uchar* theColorIndic
 		mColorTable = theColorTable;
 		mColorIndices = theColorIndices;
 	}
+#ifdef PS2_PLATFORM
 	else if (theRGBBits != NULL)
 	{
 		mRGBBits = theRGBBits;
 	}
+#else
+	else
+	{
+		// Never produced off PS2 (see SetCompactBits); freeing rather than
+		// leaking if a caller ever hands one over anyway.
+		delete [] theRGBBits;
+	}
+#endif
 
 	mHasTrans = hasTrans;
 	mHasAlpha = hasAlpha;
@@ -1395,8 +1420,38 @@ uint32_t* MemoryImage::GetBits()
 	{
 		int aSize = mWidth*mHeight;
 
-		mBits = new uint32_t[aSize+1];		
-		mBits[aSize] = MEMORYCHECK_ID;		
+#ifdef SEXY_LAZY_IMAGES
+		// This allocation can fail into the new-wrap's rescue purge
+		// (main_pvz_ps2.cpp), which frees the bits of every clean unpinned
+		// image — including THIS one: freshly decoded, its mColorTable/
+		// mColorIndices are exactly what the expansion below is about to
+		// read, and the purge also flips mLazyUnloaded back on mid-call.
+		// Pin across the allocation; nothrow + explicit throw keeps the
+		// throwing contract while restoring the pin on failure.
+		bool aWasPinned = mLazyPinned;
+		mLazyPinned = true;
+		#ifdef WII_PLATFORM
+		mBits = static_cast<uint32_t*>(ConsoleGraphicsAlloc((aSize + 1) * sizeof(uint32_t)));
+		if (mBits == NULL)
+		#endif
+			mBits = new (std::nothrow) uint32_t[aSize+1];
+		mLazyPinned = aWasPinned;
+		if (mBits == NULL)
+		{
+			// Fail soft. The compact form is still intact (the frees below
+			// only run after a successful expansion), so the next GetBits()
+			// simply retries. Every caller that can reach this under memory
+			// pressure — texture piece upload, sanding, the alpha compose —
+			// tolerates NULL; the previous throw here turned "no room to
+			// sand a 434x144 cloud" into a fatal bad_alloc on the selector
+			// screen. Unchecked software-blit callers only touch runtime
+			// images that already carry mBits and never take this path.
+			return NULL;
+		}
+#else
+		mBits = new uint32_t[aSize+1];
+#endif
+		mBits[aSize] = MEMORYCHECK_ID;
 
 #ifdef PS2_PLATFORM
 		if (mRGBBits != NULL)
@@ -2071,7 +2126,12 @@ bool MemoryImage::Palletize()
 	if (mBits == NULL)
 		return false;
 
-	mColorIndices = new uchar[mWidth*mHeight];
+	const size_t aColorIndexBytes = (size_t)mWidth * (size_t)mHeight;
+#ifdef WII_PLATFORM
+	mColorIndices = static_cast<uchar*>(ConsoleGraphicsAlloc(aColorIndexBytes));
+	if (mColorIndices == NULL)
+#endif
+		mColorIndices = new uchar[aColorIndexBytes];
 	mColorTable = new uint32_t[256];
 
 	if (!Quantize8Bit(mBits, mWidth, mHeight, mColorIndices, mColorTable))

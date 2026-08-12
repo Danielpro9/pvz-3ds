@@ -23,6 +23,7 @@ public:
 			
 	void					SeekFront() const;
 	void					Clear();
+	void					Reserve(int theBytes);
 
 	void					FromWebString(const std::string& theString);
 	void					WriteByte(uchar theByte);

@@ -9,6 +9,7 @@ class Board;
 class LawnApp;
 class GameButton;
 class ToolTipWidget;
+struct TodWeightedArray;
 namespace Sexy
 {
     class MTRand;
@@ -69,6 +70,7 @@ public:
     int                     mLastMouseY;                        //+0xD34
     SeedChooserState        mChooseState;                       //+0xD38
     int                     mViewLawnTime;                      //+0xD3C
+    int                     mKeyboardSeed;                      // D-Pad/keyboard focus
 
 public:
     SeedChooserScreen();
@@ -109,6 +111,8 @@ public:
     void                    CloseSeedChooser();
     virtual void            KeyDown(KeyCode theKey);
     virtual void            KeyChar(SexyChar theChar);
+    bool                    HasKeyboardSelection() const;
+	void                    ClearKeyboardSelection();
     void                    UpdateAfterPurchase();
 };
 

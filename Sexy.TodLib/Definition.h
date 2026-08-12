@@ -181,7 +181,7 @@ void*                   DefinitionCompressCompiledBuffer(void* theBuffer, unsign
 /*inline*/ unsigned int DefinitionGetDeepSize(DefMap* theDefMap, void* theDefinition);
 /*inline*/ unsigned int DefinitionGetSize(DefMap* theDefMap, void* theDefinition);
 /*inline*/ void*        DefinitionAlloc(int theSize);
-void*                   DefinitionUncompressCompiledBuffer(void* theCompressedBuffer, size_t theCompressedBufferSize, size_t& theUncompressedSize, const SexyString& theCompiledFilePath);
+void*                   DefinitionUncompressCompiledBuffer(void* theCompressedBuffer, size_t theCompressedBufferSize, size_t& theUncompressedSize, const SexyString& theCompiledFilePath, void* theDestination = nullptr, size_t theDestinationCapacity = 0);
 uint /**/        DefinitionCalcHashSymbolMap(int aSchemaHash, DefSymbol* theSymbolMap);
 uint /**/        DefinitionCalcHashDefMap(int aSchemaHash, DefMap* theDefMap, TodList<DefMap*>& theProgressMaps);
 uint /**/        DefinitionCalcHash(DefMap* theDefMap);

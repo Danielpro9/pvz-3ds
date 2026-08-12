@@ -28,6 +28,7 @@ public:
     ImageVariationList      mImageVariationList;
     MemoryImage*            mLawnMowers[LawnMowerType::NUM_MOWER_TYPES];
     MemoryImage*            mZombieImages[ZombieType::NUM_CACHED_ZOMBIE_TYPES];
+    int                     mLowMemoryMenuCacheFamily;
     LawnApp*                mApp;
 
 public:
@@ -37,6 +38,8 @@ public:
     void                    ReanimatorCacheInitialize();
     void                    ReanimatorCacheDispose();
     void                    ReanimatorCachePurge();
+    void                    ReanimatorCachePurgePlants();
+    void                    ReanimatorCachePurgeZombies();
     void                    DrawCachedPlant(Graphics* g, float thePosX, float thePosY, SeedType theSeedType, DrawVariation theDrawVariation);
     void                    DrawCachedMower(Graphics* g, float thePosX, float thePosY, LawnMowerType theMowerType);
     void                    DrawCachedZombie(Graphics* g, float thePosX, float thePosY, ZombieType theZombieType);

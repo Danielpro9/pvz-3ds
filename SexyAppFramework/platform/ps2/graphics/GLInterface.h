@@ -142,6 +142,11 @@ public:
 	float mMaxTotalU, mMaxTotalV;
 	PixelFormat mPixelFormat;
 	int mImageFlags;
+	// Draws of this image to skip before retrying a failed CreateTextures
+	// (decode refused or a piece's shim allocation failed). Per-image, so one
+	// stuck image can't starve another's retry and a burst of failures can't
+	// re-decode every frame.
+	int mCreateFailCooldown;
 
 	TextureData();
 	~TextureData();

@@ -65,7 +65,13 @@ StoreScreen::StoreScreen(LawnApp* theApp) : Dialog(nullptr, nullptr, DIALOG_STOR
     mHatchOpen = true;
     mEasyBuyingCheat = false;
     mWaitForDialog = false;
+#ifdef PS2_PLATFORM
+    // 64, not 1024: these are just the purchase/award coin effects inside the
+    // store screen — a handful exist at once. ~200KB less while the store is up.
+    mCoins.DataArrayInitialize(64U, "coins");
+#else
     mCoins.DataArrayInitialize(1024U, "coins");
+#endif
     mLoadedResourceNames.push_back("DelayLoad_Store");
 	for (std::string& resource : mLoadedResourceNames)
 		TodLoadResources(resource.c_str());

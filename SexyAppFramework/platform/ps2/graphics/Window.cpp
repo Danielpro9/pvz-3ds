@@ -25,7 +25,13 @@ static void InitPs2GsKit()
 		D_CTRL_STD_OFF, D_CTRL_RCYC_8, 1 << DMA_CHANNEL_GIF);
 	dmaKit_chan_init(DMA_CHANNEL_GIF);
 
-	gsGlobal = gsKit_init_global();
+	// Custom queue sizes instead of gsKit_init_global()'s defaults (1MB oneshot
+	// + 256KB persistent, x2 buffers each = 2.5MB of heap). The persistent
+	// queue is never used (everything renders GS_ONESHOT, switched below) and
+	// oneshot overflow is handled by ps2_gs_queue_guard in gles_ps2.cpp, which
+	// execs+resets the queue mid-frame with nothing dropped — so a small pool
+	// only costs extra flushes on monster frames, never corruption. ~1.7MB back.
+	gsGlobal = gsKit_init_global_custom(384 * 1024, 32 * 1024);
 	bool isPal = graph_get_region() == GRAPH_MODE_PAL;
 	gsGlobal->Mode = isPal ? GS_MODE_PAL : GS_MODE_NTSC;
 	// FRAME (not FIELD): with FIELD rendering, anything that moves shears into

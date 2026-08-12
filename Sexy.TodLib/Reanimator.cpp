@@ -7,11 +7,17 @@
 #include "ReanimAtlas.h"
 #include "EffectSystem.h"
 #include "../GameConstants.h"
+#include "../Resources.h"
 #include "graphics/Font.h"
 #include "misc/PerfTimer.h"
 #include "graphics/MemoryImage.h"
 #include <set>
 #include <vector>
+
+#ifdef PS2_PLATFORM
+#include <pthread.h>
+#include "graphics/GLInterface.h"
+#endif
 
 #ifdef PS2_PLATFORM
 // Park the audio mixer around reanim file I/O. On PS2 the mixer thread issues
@@ -313,7 +319,10 @@ Reanimation::Reanimation()
 	mDefinition = nullptr;
 	mLoopType = ReanimLoopType::REANIM_PLAY_ONCE;
 	mLastFrameTime = -1.0f;
-	mDead = false;
+	// An object is not live until ReanimationInitialize finishes.  Keeping a
+	// freshly constructed instance dead makes stack unwinding safe if loading
+	// a definition or building its atlas throws.
+	mDead = true;
 	mFrameStart = 0;
 	mFrameCount = 0;
 	mFrameBasePose = -1;
@@ -384,12 +393,48 @@ void ReanimationCreateAtlas(ReanimatorDefinition* theDefinition, ReanimationType
 			gSexyAppBase->PurgeLazyImage(aOriginal, true);
 	}
 
-	// The atlas surface itself is the other big duplicate: once uploaded, the
-	// GL shim keeps its own CPU copy, so let EnsureTexture drop these bits
-	// after the first draw (GetBits recovers them from the shim if a software
-	// blit ever needs them again).
 	if (aAtlas->mMemoryImage != nullptr)
+	{
+#ifdef WII_PLATFORM
+		// The Almanac first draws a live Sunflower/Zombie on its index page,
+		// then builds the small selector thumbnails in software from the same
+		// atlas. Wii/OpenGX has no glGetTexImage: purging the atlas after that
+		// first GPU upload made the later software draw reconstruct an all-zero
+		// surface, which the cache correctly reported as "blank; will retry".
+		//
+		// Keep a recoverable CPU copy, but palletize it now so it costs roughly
+		// one byte per pixel rather than four while it is only GPU-resident. A
+		// later software blit expands it temporarily; the normal per-thumbnail
+		// definition cleanup then releases the whole atlas.
+		aAtlas->mMemoryImage->Palletize();
+		aAtlas->mMemoryImage->mPurgeBits = false;
+#else
+		// Other accelerated backends can recover the surface from their texture
+		// copy, so they may still discard the duplicate after the first upload.
 		aAtlas->mMemoryImage->mPurgeBits = true;
+#endif
+	}
+#endif
+
+#ifdef PS2_PLATFORM
+	// Commit right here instead of waiting for this atlas's first natural
+	// draw. That matters for both callers of this function: a preload burst
+	// (the credits screen stacks ~35 atlases) would otherwise accumulate
+	// every surface's full 32bpp bits at once, and an on-demand build mid-
+	// gameplay (ReanimationInitialize, e.g. the first zombie of a new type
+	// spawning in a wave) would otherwise keep its surface alive through the
+	// rest of the current frame's render-list build/sort/draw — exactly
+	// when the heap is already busiest and a big contiguous alloc is least
+	// likely to succeed. The shim keeps only its quarter-size palettized
+	// copy; GS VRAM residency stays deferred to the first bind. The texture
+	// table is primary-thread-only, so an off-thread build (loading thread)
+	// keeps the old commit-on-first-draw behavior.
+	if (aAtlas->mMemoryImage != nullptr && gSexyAppBase->mGLInterface != nullptr &&
+		(gSexyAppBase->mPrimaryThreadId == 0 ||
+		 (void*)pthread_self() == gSexyAppBase->mPrimaryThreadId))
+	{
+		gSexyAppBase->mGLInterface->CreateImageTexture(aAtlas->mMemoryImage);
+	}
 #endif
 
 	TodHesitationTrace("atlas '%s'", aParam.mReanimFileName);
@@ -406,6 +451,9 @@ void ReanimationPreload(ReanimationType theReanimationType)
 	ReanimationCreateAtlas(aReanimDef, theReanimationType);
 	if (aReanimDef->mReanimAtlas)
 	{
+		// The PS2 immediate-commit-and-drop-bits step lives in
+		// ReanimationCreateAtlas itself now, so it also covers the on-demand
+		// build from ReanimationInitialize (see the comment there).
 		TodSandImageIfNeeded(aReanimDef->mReanimAtlas->mMemoryImage);
 	}
 }
@@ -414,10 +462,10 @@ void ReanimationPreload(ReanimationType theReanimationType)
 void Reanimation::ReanimationInitialize(float theX, float theY, ReanimatorDefinition* theDefinition)
 {
 	TOD_ASSERT(mTrackInstances == nullptr);
-	ReanimationCreateAtlas(theDefinition, mReanimationType);
-	mDead = false;
-	SetPosition(theX, theY);
+	TOD_ASSERT(mDead);
 	mDefinition = theDefinition;
+	ReanimationCreateAtlas(theDefinition, mReanimationType);
+	SetPosition(theX, theY);
 	mAnimRate = theDefinition->mFPS;
 	mLastFrameTime = -1.0f;
 
@@ -435,6 +483,10 @@ void Reanimation::ReanimationInitialize(float theX, float theY, ReanimatorDefini
 	}
 	else
 		mFrameCount = 0;
+
+	// Publish the reanimation as live only after every potentially throwing
+	// allocation and track construction has completed.
+	mDead = false;
 }
 
 //0x471BC0
@@ -714,6 +766,8 @@ bool Reanimation::DrawTrack(Graphics* g, int theTrackIndex, int theRenderGroup, 
 	}
 
 	Image* aImage = aTransform.mImage;
+	if (aTrackInstance->mImageOverride == IMAGE_BLANK)
+		return false;
 	ReanimAtlasImage* aAtlasImage = nullptr;
 	if (mDefinition->mReanimAtlas != nullptr && aImage != nullptr)  // 如果 atlas 存在且当前变换存在图像（aTransform.mImage 实际为整数型的图集编号）
 	{
@@ -725,6 +779,12 @@ bool Reanimation::DrawTrack(Graphics* g, int theTrackIndex, int theRenderGroup, 
 		if (aTrackInstance->mImageOverride != nullptr)  // 如果目标轨道存在覆写贴图
 		{
 			aAtlasImage = nullptr;  // 不使用图集
+		}
+		else if (aAtlasImage == nullptr && (uintptr_t)aImage <= 1000)
+		{
+			// Atlas-local index copied from a different definition.  It cannot
+			// be decoded safely here, so omit this one track image.
+			aImage = nullptr;
 		}
 	}
 	SexyMatrix3 aMatrix;
@@ -839,6 +899,8 @@ Image* Reanimation::GetCurrentTrackImage(const char* theTrackName)
 		ReanimAtlasImage* aAtlasImage = mDefinition->mReanimAtlas->GetEncodedReanimAtlas(aImage);  // 取得相应的图集数据
 		if (aAtlasImage != nullptr)
 			aImage = aAtlasImage->mOriginalImage;  // 返回图集对应的原贴图
+		else if ((uintptr_t)aImage <= 1000)
+			aImage = nullptr;
 	}
 	return aImage;
 }
@@ -856,6 +918,8 @@ void Reanimation::GetTrackMatrix(int theTrackIndex, SexyTransform2D& theMatrix)
 		ReanimAtlasImage* aAtlasImage = mDefinition->mReanimAtlas->GetEncodedReanimAtlas(aImage);  // 取得相应的图集数据
 		if (aAtlasImage != nullptr)
 			aImage = aAtlasImage->mOriginalImage;  // 返回图集对应的原贴图
+		else if ((uintptr_t)aImage <= 1000)
+			aImage = nullptr;
 	}
 
 	theMatrix.LoadIdentity();
@@ -1079,6 +1143,8 @@ void Reanimation::ReanimationDie()
 	if (!mDead)
 	{
 		mDead = true;
+		if (mDefinition == nullptr || mTrackInstances == nullptr)
+			return;
 		for (int aTrackIndex = 0; aTrackIndex < mDefinition->mTracks.count; aTrackIndex++)
 		{
 			TOD_ASSERT(mTrackInstances);
@@ -1264,7 +1330,7 @@ static void ReanimationCollectSourceImages(ReanimatorDefinition* theDefinition, 
 		for (int i = 0; i < aTrack->mTransforms.count; i++)
 		{
 			Image* aImage = aTrack->mTransforms.mTransforms[i].mImage;
-			if (aImage != nullptr && (intptr_t)aImage > 1000)
+			if (aImage != nullptr && (uintptr_t)aImage > 1000)
 				theImages.insert(aImage);
 		}
 	}
@@ -1295,6 +1361,15 @@ void ReanimatorFreeUnusedDefinitions(const std::vector<bool>* theOnlyTypes)
 		}
 	}
 
+	// The selector-screen definition is reloaded the moment the player returns
+	// to the menu, and it is the biggest single def block (~1.9MB contiguous).
+	// It loads at boot into a compact heap; freeing it on board teardown means
+	// re-allocating that block into whatever the level just fragmented —
+	// observed 2026-07-18: bad_alloc for 1900725 bytes with 10MB free.
+	// Keep it resident so its block stays at its boot-time address for good.
+	if ((unsigned int)ReanimationType::REANIM_SELECTOR_SCREEN < gReanimatorDefCount)
+		aInUse[(int)ReanimationType::REANIM_SELECTOR_SCREEN] = true;
+
 	int aFreedCount = 0;
 	std::set<Image*> aFreedImages;
 	for (unsigned int i = 0; i < gReanimatorDefCount; i++)
@@ -1323,9 +1398,37 @@ void ReanimatorFreeUnusedDefinitions(const std::vector<bool>* theOnlyTypes)
 	for (Image* aImage : aStillUsed)
 		aFreedImages.erase(aImage);
 
+#ifdef SEXY_LAZY_IMAGES
+	// Keep the Image object shells: their pixel payload is what matters and
+	// PurgeLazyImages already reclaims it (definition images load through the
+	// lazy machinery), so deleting the objects only recovers ~200B shells —
+	// while being the one step here that can leave a dangling Image* for a
+	// draw to trip on later (same lesson as the credits bits-only eviction).
+	// Suspected in the 2026-07-18 TLB crash inside TextureData::CreateTextures,
+	// where a pointer was stomped with "…ean…" string bytes (freed block
+	// reused by a path string).
+	//
+	// The condition is SEXY_LAZY_IMAGES and not PS2_PLATFORM, which is what it
+	// used to be. Every word of the reasoning above is about the lazy machinery
+	// reclaiming the payload, not about the PS2 — so the moment Wii joined
+	// SEXY_LAZY_IMAGES (MemoryImage.h) it needed this too, and instead it kept
+	// taking the branch below. It produced the same crash in the same function:
+	// Wii, 2026-08-08, ISI with PC == CTR == 0xDC800000 inside
+	// TextureData::CreateTextures, reached from a particle's TodTriangleGroup —
+	// a jump through the vtable of a deleted MemoryImage, since CreateTextures
+	// opens on the virtual DeleteSWBuffers().
+	//
+	// The orphan test above is the reason a dangling pointer is reachable at
+	// all: it asks which images the remaining *reanimation* definitions still
+	// reference, and nothing else. A TodEmitterDefinition holding the same
+	// Image* in mImage is invisible to it, so a particle emitter can outlive
+	// the image it draws with.
+	TodTrace("freed %d reanim defs, kept %d source image shells", aFreedCount, (int)aFreedImages.size());
+#else
 	int aDeletedImages = ((TodResourceManager*)gSexyAppBase->mResourceManager)->DeleteUngroupedImages(aFreedImages);
 	gSexyAppBase->CleanSharedImages();
 	TodTrace("freed %d reanim defs, %d source images", aFreedCount, aDeletedImages);
+#endif
 }
 
 // Frees a single definition if no live Reanimation uses it. Used on LOW_MEMORY

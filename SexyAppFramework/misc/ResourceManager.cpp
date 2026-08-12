@@ -9,10 +9,66 @@
 //#include "graphics/SysFont.h"
 #include "imagelib/ImageLib.h"
 
+#ifdef PS2_PLATFORM
+#include <pthread.h>
+#include "platform/ps2/Ps2IoLock.h" // GetImageDims header probes read the pak
+#elif defined(WII_PLATFORM)
+static inline void Ps2IoLockAcquire() {}
+static inline void Ps2IoLockRelease() {}
+#endif
+
 //#define SEXY_PERF_ENABLED
 #include "PerfTimer.h"
 
 using namespace Sexy;
+
+#ifdef SEXY_COMPACT_IMAGES
+// Per-pixel alpha byte from a companion image without forcing its w*h*4
+// expansion when it arrived compact (paletted PNG / 24-bit RGB). The byte
+// read is the blue channel — exactly what the expanded compose loops read as
+// bits[i] & 0xFF. Pointers are only valid while the source image is alive.
+struct CompactAlphaSource
+{
+	const uint32_t* mBits;
+	const uint32_t* mTable;
+	const unsigned char* mIndices;
+	const unsigned char* mRgb;
+
+	bool Init(ImageLib::Image* theImage)
+	{
+		mBits = theImage->mBits;
+		mTable = NULL;
+		mIndices = NULL;
+		mRgb = NULL;
+		if (mBits != NULL)
+			return true;
+		if (theImage->mColorTable != NULL && theImage->mColorIndices != NULL)
+		{
+			mTable = theImage->mColorTable;
+			mIndices = theImage->mColorIndices;
+			return true;
+		}
+		// Always NULL off PS2 — no other target decodes into this form.
+		if (theImage->mRGBBits != NULL)
+		{
+			mRgb = theImage->mRGBBits;
+			return true;
+		}
+		// Unknown form: last resort is the 32-bit expansion (NULL on OOM).
+		mBits = theImage->GetBits();
+		return mBits != NULL;
+	}
+
+	unsigned char At(int thePixelIndex) const
+	{
+		if (mBits != NULL)
+			return (unsigned char)(mBits[thePixelIndex] & 0xFF);
+		if (mTable != NULL)
+			return (unsigned char)(mTable[mIndices[thePixelIndex]] & 0xFF);
+		return mRgb[thePixelIndex * 3 + 2];
+	}
+};
+#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
@@ -625,51 +681,70 @@ bool ResourceManager::ReparseResourcesFile(const std::string& theFilename)
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// Compose core shared by the load-time wrapper below and the lazy re-decode
+// path (ReapplyLazyAlpha). Writes the companion's alpha into theImage's
+// expanded 32-bit bits; an OOM while expanding leaves the image opaque.
 ///////////////////////////////////////////////////////////////////////////////
-bool ResourceManager::LoadAlphaGridImage(ImageRes *theRes, GLImage *theImage)
-{	
-	ImageLib::Image* anAlphaImage = ImageLib::GetImage(theRes->mAlphaGridImage,true);	
-	if (anAlphaImage==NULL)
-		return Fail(StrFormat("Failed to load image: %s",theRes->mAlphaGridImage.c_str()));
+bool ResourceManager::ComposeAlphaGridInto(MemoryImage *theImage, ImageLib::Image *theAlphaImage, int theNumRows, int theNumCols, const char *theNameForLog)
+{
+	if (theNumRows < 1)
+		theNumRows = 1;
+	if (theNumCols < 1)
+		theNumCols = 1;
 
-	std::unique_ptr<ImageLib::Image> aDelAlphaImage(anAlphaImage);
+	int aCelWidth = theImage->mWidth/theNumCols;
+	int aCelHeight = theImage->mHeight/theNumRows;
 
-	int aNumRows = theRes->mRows;
-	int aNumCols = theRes->mCols;
-
-	int aCelWidth = theImage->mWidth/aNumCols;
-	int aCelHeight = theImage->mHeight/aNumRows;
-
-
-	if (anAlphaImage->mWidth!=aCelWidth || anAlphaImage->mHeight!=aCelHeight)
-		return Fail(StrFormat("GridAlphaImage size mismatch between %s and %s",theRes->mPath.c_str(),theRes->mAlphaGridImage.c_str()));
+	if (theAlphaImage->mWidth!=aCelWidth || theAlphaImage->mHeight!=aCelHeight)
+	{
+		printf("[IMG] alphagrid size mismatch '%s' (%dx%d vs cel %dx%d); alpha dropped\n",
+			theNameForLog, theAlphaImage->mWidth, theAlphaImage->mHeight, aCelWidth, aCelHeight);
+		return false;
+	}
 
 	// On PS2 the alpha companion can arrive in compact form (24-bit JPG,
 	// paletted PNG) with mBits still NULL until GetBits() expands it; composing
 	// through the raw pointer reads address 0 — garbage alpha on emulators, a
 	// TLB exception and silent freeze on real hardware. NULL from GetBits()
 	// means the expansion OOMed: keep the image opaque rather than fail the load.
-	uint32_t* anAlphaSrcBits = anAlphaImage->GetBits();
+#ifdef SEXY_COMPACT_IMAGES
+	// CompactAlphaSource reads the compact form in place — the companion's own
+	// w*h*4 expansion is exactly the transient allocation that OOMs during
+	// tight loads.
+	CompactAlphaSource anAlphaSrc;
+	uint32_t* aMasterRowPtr = theImage->GetBits();
+	if (!anAlphaSrc.Init(theAlphaImage) || aMasterRowPtr == NULL)
+#else
+	uint32_t* anAlphaSrcBits = theAlphaImage->GetBits();
 	uint32_t* aMasterRowPtr = theImage->GetBits();
 	if (anAlphaSrcBits == NULL || aMasterRowPtr == NULL)
+#endif
 	{
-		printf("[IMG] OOM expanding '%s' for alpha compose; alpha dropped\n", theRes->mAlphaGridImage.c_str());
-		return true;
+		printf("[IMG] OOM expanding '%s' for alpha compose; alpha dropped\n", theNameForLog);
+		return false;
 	}
-	for (int i=0; i < aNumRows; i++)
+	for (int i=0; i < theNumRows; i++)
 	{
 		uint32_t *aMasterColPtr = aMasterRowPtr;
-		for (int j=0; j < aNumCols; j++)
+		for (int j=0; j < theNumCols; j++)
 		{
 			uint32_t* aRowPtr = aMasterColPtr;
+#ifdef SEXY_COMPACT_IMAGES
+			int anAlphaIndex = 0;
+#else
 			uint32_t* anAlphaBits = anAlphaSrcBits;
+#endif
 			for (int y=0; y<aCelHeight; y++)
 			{
 				uint32_t *aDestPtr = aRowPtr;
 				for (int x=0; x<aCelWidth; x++)
 				{
+#ifdef SEXY_COMPACT_IMAGES
+					*aDestPtr = (*aDestPtr & 0x00FFFFFF) | ((uint32_t)anAlphaSrc.At(anAlphaIndex++) << 24);
+#else
 					*aDestPtr = (*aDestPtr & 0x00FFFFFF) | ((*anAlphaBits & 0xFF) << 24);
 					++anAlphaBits;
+#endif
 					++aDestPtr;
 				}
 				aRowPtr += theImage->mWidth;
@@ -679,6 +754,75 @@ bool ResourceManager::LoadAlphaGridImage(ImageRes *theRes, GLImage *theImage)
 		}
 		aMasterRowPtr += aCelHeight*theImage->mWidth;
 	}
+
+	theImage->BitsChanged();
+	return true;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+bool ResourceManager::LoadAlphaGridImage(ImageRes *theRes, GLImage *theImage)
+{
+	ImageLib::Image* anAlphaImage = ImageLib::GetImage(theRes->mAlphaGridImage,true);
+	if (anAlphaImage==NULL)
+		return Fail(StrFormat("Failed to load image: %s",theRes->mAlphaGridImage.c_str()));
+
+	std::unique_ptr<ImageLib::Image> aDelAlphaImage(anAlphaImage);
+
+	int aCelWidth = theImage->mWidth/theRes->mCols;
+	int aCelHeight = theImage->mHeight/theRes->mRows;
+
+	if (anAlphaImage->mWidth!=aCelWidth || anAlphaImage->mHeight!=aCelHeight)
+		return Fail(StrFormat("GridAlphaImage size mismatch between %s and %s",theRes->mPath.c_str(),theRes->mAlphaGridImage.c_str()));
+
+	// An OOM inside the compose drops the alpha but is not a load failure.
+	ComposeAlphaGridInto(theImage, anAlphaImage, theRes->mRows, theRes->mCols, theRes->mAlphaGridImage.c_str());
+	return true;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Whole-image variant of ComposeAlphaGridInto; same sharing and OOM policy.
+///////////////////////////////////////////////////////////////////////////////
+bool ResourceManager::ComposeAlphaInto(MemoryImage *theImage, ImageLib::Image *theAlphaImage, const char *theNameForLog)
+{
+	if (theAlphaImage->mWidth!=theImage->mWidth || theAlphaImage->mHeight!=theImage->mHeight)
+	{
+		printf("[IMG] alpha size mismatch '%s' (%dx%d vs %dx%d); alpha dropped\n",
+			theNameForLog, theAlphaImage->mWidth, theAlphaImage->mHeight, theImage->mWidth, theImage->mHeight);
+		return false;
+	}
+
+	// Same compact-image hazard as ComposeAlphaGridInto: expand via GetBits()
+	// instead of reading mBits raw (NULL for 24-bit JPG / paletted PNG on PS2).
+	int aSize = theImage->mWidth*theImage->mHeight;
+#ifdef SEXY_COMPACT_IMAGES
+	// Compact companion read in place — skips its w*h*4 expansion.
+	CompactAlphaSource anAlphaSrc;
+	uint32_t* aBits1 = theImage->GetBits();
+	if (aBits1 == NULL || !anAlphaSrc.Init(theAlphaImage))
+	{
+		printf("[IMG] OOM expanding '%s' for alpha compose; alpha dropped\n", theNameForLog);
+		return false;
+	}
+
+	for (int i = 0; i < aSize; i++)
+		aBits1[i] = (aBits1[i] & 0x00FFFFFF) | ((uint32_t)anAlphaSrc.At(i) << 24);
+#else
+	uint32_t* aBits1 = theImage->GetBits();
+	uint32_t* aBits2 = theAlphaImage->GetBits();
+	if (aBits1 == NULL || aBits2 == NULL)
+	{
+		printf("[IMG] OOM expanding '%s' for alpha compose; alpha dropped\n", theNameForLog);
+		return false;
+	}
+
+	for (int i = 0; i < aSize; i++)
+	{
+		*aBits1 = (*aBits1 & 0x00FFFFFF) | ((*aBits2 & 0xFF) << 24);
+		++aBits1;
+		++aBits2;
+	}
+#endif
 
 	theImage->BitsChanged();
 	return true;
@@ -700,27 +844,46 @@ bool ResourceManager::LoadAlphaImage(ImageRes *theRes, GLImage *theImage)
 	if (anAlphaImage->mWidth!=theImage->mWidth || anAlphaImage->mHeight!=theImage->mHeight)
 		return Fail(StrFormat("AlphaImage size mismatch between %s and %s",theRes->mPath.c_str(),theRes->mAlphaImage.c_str()));
 
-	// Same compact-image hazard as LoadAlphaGridImage: expand via GetBits()
-	// instead of reading mBits raw (NULL for 24-bit JPG / paletted PNG on PS2).
-	uint32_t* aBits1 = theImage->GetBits();
-	uint32_t* aBits2 = anAlphaImage->GetBits();
-	if (aBits1 == NULL || aBits2 == NULL)
-	{
-		printf("[IMG] OOM expanding '%s' for alpha compose; alpha dropped\n", theRes->mAlphaImage.c_str());
-		return true;
-	}
-	int aSize = theImage->mWidth*theImage->mHeight;
-
-	for (int i = 0; i < aSize; i++)
-	{
-		*aBits1 = (*aBits1 & 0x00FFFFFF) | ((*aBits2 & 0xFF) << 24);
-		++aBits1;
-		++aBits2;
-	}
-
-	theImage->BitsChanged();
+	// An OOM inside the compose drops the alpha but is not a load failure.
+	ComposeAlphaInto(theImage, anAlphaImage, theRes->mAlphaImage.c_str());
 	return true;
 }
+
+#ifdef SEXY_LAZY_IMAGES
+///////////////////////////////////////////////////////////////////////////////
+// Re-applies the alpha-companion recipe stored by DoLoadImage after every
+// lazy (re-)decode of the main image. Because the composite is reproducible
+// this way, images with explicit alpha no longer need a lifetime pin — the
+// zombie-note letters (~750KB each) and the night-pool overlays used to
+// accumulate as unpurgeable residents until the heap tipped over.
+///////////////////////////////////////////////////////////////////////////////
+bool ResourceManager::ReapplyLazyAlpha(MemoryImage *theImage)
+{
+	bool aGrid = !theImage->mLazyAlphaGridPath.empty();
+	const std::string& aPath = aGrid ? theImage->mLazyAlphaGridPath : theImage->mLazyAlphaImagePath;
+	if (aPath.empty())
+		return true;
+
+	ImageLib::Image* anAlphaImage = ImageLib::GetImage(aPath, true);
+	if (anAlphaImage == NULL)
+	{
+		printf("[IMG] lazy alpha companion missing '%s'; alpha dropped\n", aPath.c_str());
+		return false;
+	}
+	std::unique_ptr<ImageLib::Image> aDelAlphaImage(anAlphaImage);
+
+	bool aComposed = aGrid
+		? ComposeAlphaGridInto(theImage, anAlphaImage, theImage->mLazyAlphaRows, theImage->mLazyAlphaCols, aPath.c_str())
+		: ComposeAlphaInto(theImage, anAlphaImage, aPath.c_str());
+
+	// The compose expanded the image to 32bpp; quantizing recovers the
+	// 8-bit+CLUT form (1B/px) when the composited pixels fit in 256 values —
+	// the mostly-black zombie notes do.
+	if (aComposed)
+		theImage->Palletize();
+	return aComposed;
+}
+#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
@@ -745,24 +908,63 @@ bool ResourceManager::DoLoadImage(ImageRes *theRes)
 
 	if (isNew)
 	{
-		if (!theRes->mAlphaImage.empty() || !theRes->mAlphaGridImage.empty())
+#ifdef SEXY_LAZY_IMAGES
+		// A lazily-stubbed image with exactly one explicit alpha companion
+		// does not compose (or even decode) here: the recipe is stored on the
+		// image and LoadLazyImageBits re-applies it on every decode. That
+		// keeps these images purgeable — pinning them for the session leaked
+		// ~750KB per zombie-note letter as the adventure progressed — and
+		// skips their decode entirely until first draw.
+		bool aLazyRecipe = aGLImage->mLazyUnloaded &&
+			(theRes->mAlphaImage.empty() != theRes->mAlphaGridImage.empty());
+		if (aLazyRecipe)
 		{
-			// Explicit alpha composition can't be reproduced by a plain
-			// re-decode of mFilePath: force the decode now and never purge.
-			aGLImage->GetBits();
-			aGLImage->mLazyPinned = true;
-		}
+			aGLImage->mLazyAlphaImagePath = theRes->mAlphaImage;
+			aGLImage->mLazyAlphaGridPath = theRes->mAlphaGridImage;
+			aGLImage->mLazyAlphaRows = theRes->mRows;
+			aGLImage->mLazyAlphaCols = theRes->mCols;
 
-		if (!theRes->mAlphaImage.empty())
-		{
-			if (!LoadAlphaImage(theRes, aSharedImageRef))
-				return false;
+			// The deferred compose can only log, so companion problems must
+			// still fail the load loudly here; the header probe is cheap.
+			const std::string& anAlphaPath = theRes->mAlphaGridImage.empty() ?
+				theRes->mAlphaImage : theRes->mAlphaGridImage;
+			int anAlphaWidth, anAlphaHeight;
+			Ps2IoLockAcquire();
+			bool anAlphaDimsOk = ImageLib::GetImageDims(anAlphaPath, anAlphaWidth, anAlphaHeight);
+			Ps2IoLockRelease();
+			if (!anAlphaDimsOk)
+				return Fail(StrFormat("Failed to load image: %s", anAlphaPath.c_str()));
+			if (!theRes->mAlphaGridImage.empty())
+			{
+				if (anAlphaWidth != aGLImage->mWidth/theRes->mCols || anAlphaHeight != aGLImage->mHeight/theRes->mRows)
+					return Fail(StrFormat("GridAlphaImage size mismatch between %s and %s",theRes->mPath.c_str(),theRes->mAlphaGridImage.c_str()));
+			}
+			else if (anAlphaWidth != aGLImage->mWidth || anAlphaHeight != aGLImage->mHeight)
+				return Fail(StrFormat("AlphaImage size mismatch between %s and %s",theRes->mPath.c_str(),theRes->mAlphaImage.c_str()));
 		}
-
-		if (!theRes->mAlphaGridImage.empty())
+		else
+#endif
 		{
-			if (!LoadAlphaGridImage(theRes, aSharedImageRef))
-				return false;
+			if (!theRes->mAlphaImage.empty() || !theRes->mAlphaGridImage.empty())
+			{
+				// Explicit alpha composition on an eager-loaded image (or with
+				// both companion kinds at once) can't be reproduced by a plain
+				// re-decode of mFilePath: force the decode now and never purge.
+				aGLImage->GetBits();
+				aGLImage->mLazyPinned = true;
+			}
+
+			if (!theRes->mAlphaImage.empty())
+			{
+				if (!LoadAlphaImage(theRes, aSharedImageRef))
+					return false;
+			}
+
+			if (!theRes->mAlphaGridImage.empty())
+			{
+				if (!LoadAlphaGridImage(theRes, aSharedImageRef))
+					return false;
+			}
 		}
 	}
 	
@@ -813,7 +1015,42 @@ bool ResourceManager::DoLoadImage(ImageRes *theRes)
 	aGLImage->mNumCols = theRes->mCols;
 
 	if (aGLImage->mPurgeBits)
+	{
+#ifdef PS2_PLATFORM
+		// PurgeBits() only actually frees anything once mD3DData exists
+		// (see MemoryImage::PurgeBits: Is3DAccelerated() + mD3DData==NULL
+		// just re-arms the flag for later). Nothing calls CreateImageTexture
+		// at load time otherwise, so a purge-flagged resource (nobits* attrs
+		// above, or an opaque ddsurface one) keeps its full decoded bits
+		// resident until its first draw. That is exactly what starves
+		// CreditScreen::PreLoadCredits: it loads 6 backgrounds back-to-back
+		// before any of them ever draws, so all 6 sit fully decoded through
+		// the ~35-atlas load that follows. Commit right here instead, same
+		// as ReanimAtlas already does for the same reason.
+		//
+		// Guard on actually having pixel data: under heap pressure the decode
+		// above can itself have OOM'd (LoadLazyImageBits logs "decode FAILED"
+		// and leaves the image with no bits at all). Forcing a texture
+		// upload from an image with nothing decoded would hand the GS a
+		// bogus/empty transfer — that is how you get an emulator-level
+		// "FQC = 0 on VIF FIFO READ" instead of a clean OOM log line. Bail
+		// the same way PurgeBits() itself already does in that situation.
+		bool aHasPixelData = (aGLImage->mBits != NULL) || (aGLImage->mColorIndices != NULL);
+#ifdef PS2_PLATFORM
+		aHasPixelData = aHasPixelData || (aGLImage->mRGBBits != NULL);
+#endif
+		if (aHasPixelData && gSexyAppBase->mGLInterface != nullptr &&
+			(gSexyAppBase->mPrimaryThreadId == 0 ||
+			 (void*)pthread_self() == gSexyAppBase->mPrimaryThreadId))
+		{
+			gSexyAppBase->mGLInterface->CreateImageTexture(aGLImage);
+		}
+		else
+			aGLImage->PurgeBits();
+#else
 		aGLImage->PurgeBits();
+#endif
+	}
 
 	ResourceLoadedHook(theRes);
 	return true;
@@ -983,57 +1220,6 @@ void ResourceManager::DeleteFont(const std::string &theName)
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
-bool ResourceManager::LoadNextResource()
-{
-	if (HadError())
-		return false;
-
-	if (mCurResGroupList==NULL)
-		return false;
-
-	while (mCurResGroupListItr!=mCurResGroupList->end())
-	{
-		BaseRes *aRes = *mCurResGroupListItr++;
-		if (aRes->mFromProgram)
-			continue;
-
-		switch (aRes->mType)
-		{
-			case ResType_Image: 
-			{
-				ImageRes *anImageRes = (ImageRes*)aRes;
-				if ((GLImage*)anImageRes->mImage!=NULL)
-					continue;
-
-				return DoLoadImage(anImageRes); 
-			}
-			
-			case ResType_Sound: 
-			{
-				SoundRes *aSoundRes = (SoundRes*)aRes;
-				if (aSoundRes->mSoundId!=-1)
-					continue;
-
-				return DoLoadSound(aSoundRes); 
-			}
-			
-			case ResType_Font: 
-			{
-				FontRes *aFontRes = (FontRes*)aRes;
-				if (aFontRes->mFont!=NULL)
-					continue;
-
-				return DoLoadFont(aFontRes);
-			}
-		}
-	}
-
-	return false;
-}
-
-///////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////
-
 void ResourceManager::ResourceLoadedHook(BaseRes*){}
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -11,7 +11,15 @@ namespace Sexy
 }
 using namespace Sexy;
 
+#ifdef PS2_PLATFORM
+// 8, not 16: attachments carry 1-3 effects in practice (boss-head smoke is the
+// known max). AttachEffect is ~48B, so 16 slots cost ~780B per Attachment —
+// ~1.6MB across the 2048-slot pool; 8 halves that. CreateEffectAttachment's
+// TOD_ASSERT names any overflow in the [FATAL] log if content ever exceeds it.
+#define MAX_EFFECTS_PER_ATTACHMENT 8
+#else
 #define MAX_EFFECTS_PER_ATTACHMENT 16
+#endif
 
 class Trail;
 class Reanimation;

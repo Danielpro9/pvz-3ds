@@ -1,8 +1,41 @@
 #include "fcaseopen.h"
 
-#include "Ps2IoLock.h" // serialize SIF RPC file I/O on PS2 (no-op elsewhere)
+#ifdef PS2_PLATFORM
+#include "Ps2IoLock.h"
+#else
+static void Ps2IoLockAcquire(void) {}
+static void Ps2IoLockRelease(void) {}
+#endif
 
 #include <unistd.h> // fix "implicit declaration of function chdir"
+
+// Whether the case-insensitive casepath() fallback is compiled and used at all.
+// It exists for case-SENSITIVE host filesystems (Linux/macOS dev builds), where
+// an asset referenced as "IMAGES/Foo.PNG" would otherwise not resolve.
+//
+// It is off wherever the underlying filesystem already matches case-insensitively,
+// because there it is pure cost: casepath() walks every path component with
+// opendir()/readdir(), so a MISS scans whole directories. The engine misses
+// constantly by design — ResourceManager probes several extensions per image and
+// the auto-alpha companion "_Name.*" that most images do not have — and images/
+// holds thousands of entries, so each miss becomes thousands of directory reads.
+//
+//   _WIN32        NTFS/FAT lookups are case-insensitive.
+//   PS2_PLATFORM  every opendir/readdir is an SIF RPC; flooding the queue
+//                 eventually crashes it (_request_end). PCSX2's host: FS is
+//                 case-insensitive anyway.
+//   WII_PLATFORM  libfat compares FAT long filenames case-insensitively, so a
+//                 direct fopen already resolves any file that exists. With the
+//                 fallback on, every probe miss became an opendir + full readdir
+//                 scan of images/ over the SD — which is what made compiling a
+//                 single reanim take ~20 seconds.
+//
+// On all of these a single failing direct fopen per miss is cheap and correct.
+#if !defined(_WIN32) && !defined(PS2_PLATFORM) && !defined(WII_PLATFORM)
+	#define FCASEOPEN_USE_CASEPATH 1
+#else
+	#define FCASEOPEN_USE_CASEPATH 0
+#endif
 
 #ifdef PS2_PLATFORM
 #include <string.h>
@@ -30,10 +63,10 @@ static const char* ps2_resolve_read_path(const char* thePath, const char* theMod
 }
 #endif
 
-// casepath()/strsep() implement the case-insensitive fallback. It is disabled on
-// PS2 (see fcaseopen/casechdir below), so skip compiling it there to avoid
-// unused-function warnings and needless dirent usage.
-#if !defined(_WIN32) && !defined(PS2_PLATFORM)
+// casepath()/strsep() implement the case-insensitive fallback. Skip compiling it
+// entirely where it is unused, to avoid unused-function warnings and needless
+// dirent usage. See FCASEOPEN_USE_CASEPATH above for why a platform opts out.
+#if FCASEOPEN_USE_CASEPATH
 #include <stdlib.h>
 #include <string.h>
 
@@ -151,19 +184,7 @@ FILE *fcaseopen(char const *path, char const *mode)
     path = ps2_resolve_read_path(path, mode, aResolved, sizeof(aResolved));
 #endif
     FILE *f = fopen(path, mode);
-    // The casepath() fallback walks directories (opendir/readdir), and on PS2
-    // every such call is an SIF RPC. It is disabled on PS2 because:
-    //   * PCSX2's host: FS (backed by Windows/NTFS) is already case-insensitive,
-    //     so a direct fopen resolves any file that actually exists;
-    //   * all real assets live in the pak (matched via the record map, no host
-    //     I/O), and the loose files we touch (main.pak, savedata, compiled/*)
-    //     are named by the game itself with consistent case.
-    // When a file is genuinely absent (e.g. auto-alpha companions "_Name.*" that
-    // most images don't have), the ResourceManager probes several extensions;
-    // the casepath fallback would turn each miss into a burst of opendir/readdir
-    // SIF RPCs, flooding and eventually crashing the RPC queue (_request_end).
-    // A single failing direct fopen per miss is cheap and correct.
-#if !defined(_WIN32) && !defined(PS2_PLATFORM)
+#if FCASEOPEN_USE_CASEPATH
     if (!f)
     {
         char *r = alloca(strlen(path) + 3);
@@ -180,7 +201,7 @@ FILE *fcaseopen(char const *path, char const *mode)
 void casechdir(char const *path)
 {
     Ps2IoLockAcquire();
-#if !defined(_WIN32) && !defined(PS2_PLATFORM)
+#if FCASEOPEN_USE_CASEPATH
     char *r = alloca(strlen(path) + 3);
     if (casepath(path, r))
     {

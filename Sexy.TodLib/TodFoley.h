@@ -2,7 +2,7 @@
 #define __TODFOLEY_H__
 
 #include "../Resources.h"
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 #include "sound/DummySoundManager.h"
 #else
 #include "sound/SDLSoundInstance.h"
@@ -156,7 +156,7 @@ extern FoleyParams gLawnFoleyParamArray[(int)FoleyType::NUM_FOLEY];  //0x69FAD0
 // ############################################################ 以下正式开始拟音音效相关声明 ############################################################
 // ######################################################################################################################################################
 
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 class TodDSoundInstance : public DummySoundInstance
 {
     friend class TodFoley;

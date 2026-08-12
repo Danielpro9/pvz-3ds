@@ -62,7 +62,25 @@ SECTIONS {
 	}
 
 	.rdata ALIGN(128): { *(.rdata) }
-	.gcc_except_table ALIGN(128): { *(.gcc_except_table) }
+
+	/* DWARF exception-handling tables. Without these rules both sections are
+	   orphans and -Wl,--gc-sections discards .eh_frame entirely (including
+	   crtbegin/crtend's begin marker and zero terminator), so the first C++
+	   throw sends libgcc's unwinder (add_fdes/classify_object_over_fdes)
+	   walking arbitrary memory: observed as a TLB-miss crash on the first
+	   TOD_ASSERT/bad_alloc instead of a caught exception. KEEP both; the
+	   terminator LONG(0) is belt-and-braces in case crtend's copy is dropped.
+	   .gcc_except_table.* matches the per-function LSDA sections emitted
+	   under -ffunction-sections. */
+	.eh_frame ALIGN(128): {
+		KEEP(*(.eh_frame))
+		KEEP(*(.eh_frame.*))
+		LONG(0)
+	}
+	.gcc_except_table ALIGN(128): {
+		KEEP(*(.gcc_except_table))
+		KEEP(*(.gcc_except_table.*))
+	}
 
 	_gp = ALIGN(128) + 0x7ff0;
 	.lit4 ALIGN(128): { *(.lit4) }

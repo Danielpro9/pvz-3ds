@@ -44,6 +44,9 @@
 #include "widget/WidgetManager.h"
 #include "misc/ResourceManager.h"
 #ifdef PS2_PLATFORM
+#include "Lawn/Ps2BoardControls.h"
+#endif
+#ifdef PS2_PLATFORM
 #include <malloc.h>                        // mallinfo() (heap-pressure checks)
 #include "platform/ps2/Ps2PvzServices.h"  // Ps2PvzServices helpers
 #include "platform/ps2/Ps2Trace.h"        // Ps2Trace / Ps2TraceBeat (startup tracer)
@@ -389,9 +392,15 @@ bool LawnApp::ShouldPurgeAssets()
 // ReanimatorCache frames, and the decoded pixels of lazy images. Everything
 // reloads transparently on next use, so this is safe at any screen
 // transition where a heavy screen (board, almanac, store) was just torn down.
-void LawnApp::PurgeUnusedAssets()
+// theForce bypasses the "skip if not under pressure yet" heuristic below: the
+// credits load (~35 atlases + 6 backgrounds, the heaviest in the game, see
+// CreditScreen::PreLoadCredits) can't afford to walk in with whatever the
+// previous screen left resident just because the heap happened to be under
+// 18MB at the moment of transition — a hitch here is free, the load screen
+// is already multi-second regardless.
+void LawnApp::PurgeUnusedAssets(bool theForce)
 {
-	if (!ShouldPurgeAssets())
+	if (!theForce && !ShouldPurgeAssets())
 	{
 		TodTrace("purge skipped: heap under pressure threshold");
 		return;
@@ -491,6 +500,14 @@ void LawnApp::PreNewGame(GameMode theGameMode, bool theLookForSavedGame)
 void LawnApp::MakeNewBoard()
 {
 	KillBoard();
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	// Level boundary: release unused menu/cache definitions plus decoded bits
+	// and textures BEFORE this level's large contiguous definition/atlas
+	// allocations. Freeing adjacent residents now lets malloc coalesce its
+	// holes; waiting for the OOM rescue after loading starts is often too late.
+	// Everything the new board needs reloads behind the level intro.
+	PurgeUnusedAssets(true);
+#endif
 	mBoard = new Board(this);
 	mBoard->Resize(0, 0, mWidth, mHeight);
 	mWidgetManager->AddWidget(mBoard);
@@ -568,6 +585,15 @@ void LawnApp::ShowGameSelector()
 	}
 
 	mGameScene = GameScenes::SCENE_MENU;
+#ifdef PS2_PLATFORM
+	// The menu is (re)entered from the heaviest scenes in the game — the
+	// credits movie, a level, the award screens. Free their leftovers (reanim
+	// definitions, decoded bits, texture copies) BEFORE the selector's own
+	// refault storm, so its texture creations aren't the allocations that
+	// fail; a creation that failed here used to leave that sprite black.
+	// Everything the selector needs re-faults lazily right below.
+	PurgeUnusedAssets(true);
+#endif
 	mGameSelector = new GameSelector(this);
 	mGameSelector->Resize(0, 0, mWidth, mHeight);
 #ifdef PS2_PLATFORM
@@ -932,6 +958,28 @@ void LawnApp::DoCreateUserDialog()
 	KillDialog(Dialogs::DIALOG_CREATEUSER);
 
 	NewUserDialog* aDialog = new NewUserDialog(this, false);
+#ifdef WII_PLATFORM
+	// FinishCreateUserDialog refuses an empty name, so seed a unique default:
+	// the first free "Player N", which also avoids the name-conflict path when
+	// more than one profile is made.
+	//
+	// Text entry does exist now (WiiOnScreenKeyboard, raised by
+	// SexyAppBase::StartTextInput), so this is no longer what makes the dialog
+	// dismissable -- it is a safety net while that keyboard is unproven, and a
+	// convenience for players who would rather click OK than type. Drop it once
+	// the keyboard has been confirmed on hardware; the cost of keeping it is
+	// that naming a profile starts with clearing the default.
+	{
+		SexyString aDefaultName;
+		for (int i = 1; i <= 99; i++)
+		{
+			aDefaultName = StrFormat(__S("Player %d"), i);
+			if (mProfileMgr->GetProfileMap().find(aDefaultName) == mProfileMgr->GetProfileMap().end())
+				break;
+		}
+		aDialog->SetName(aDefaultName);
+	}
+#endif
 	CenterDialog(aDialog, aDialog->mWidth, aDialog->mHeight);
 	AddDialog(Dialogs::DIALOG_CREATEUSER, aDialog);
 }
@@ -1788,11 +1836,18 @@ void LawnApp::UpdateFrames()
 	for (int i = 0; i < aUpdateCount; i++)
 	{
 		mAppCounter++;
-		
+
 		if (mBoard)
 		{
 			mBoard->ProcessDeleteQueue();
 		}
+
+#ifdef PS2_PLATFORM
+		// Console-style pad controls (cell snap, seed cycling, shovel) feed
+		// the board synthesized mouse events; run them just before the board
+		// updates so a press acts on this frame's state.
+		Ps2UpdateBoardControls(this);
+#endif
 
 		SexyApp::UpdateFrames();
 
@@ -1823,6 +1878,13 @@ void LawnApp::ToggleFastMo()
 #define LAWN_LOAD_HEARTBEAT() Ps2TraceBeat()  // pulse border per resource (Ps2Trace.c)
 #else
 #define LAWN_LOAD_HEARTBEAT() ((void)0)
+#endif
+
+#ifdef WII_PLATFORM
+#include "platform/wii/WiiEarlyInit.h"
+#define WII_LOAD_STAGE(name) wiiLog("[WII][LOAD] %s\n", name)
+#else
+#define WII_LOAD_STAGE(name) ((void)0)
 #endif
 
 //0x452740
@@ -1884,6 +1946,7 @@ struct Ps2MixerLoadPauseGuard
 
 void LawnApp::LoadingThreadProc()
 {
+	WII_LOAD_STAGE("begin");
 	LAWN_MIXER_PAUSE_DURING_LOAD();  // no audsrv SIF RPCs while we own the IOP
 	TodTraceAndLog("[LOAD] loading thread entered");
 	LAWN_LOAD_STAGE(LOAD_LOADERBAR);
@@ -1893,6 +1956,7 @@ void LawnApp::LoadingThreadProc()
 		return;
 	}
 	TodTraceAndLog("[LOAD] LoaderBar ready");
+	WII_LOAD_STAGE("LoaderBar ready");
 
 	TodTraceAndLog("[LOAD] begin LawnStrings");
 	LAWN_LOAD_STAGE(LOAD_STRINGS);
@@ -1926,9 +1990,13 @@ void LawnApp::LoadingThreadProc()
 	TodHesitationTrace("loading thread start");
 
 	LAWN_LOAD_STAGE(LOAD_IMAGES);
+	WII_LOAD_STAGE("LoadingImages begin");
 	LoadGroup("LoadingImages", 9);
+	WII_LOAD_STAGE("LoadingImages done");
 	LAWN_LOAD_STAGE(LOAD_FONTS);
+	WII_LOAD_STAGE("LoadingFonts begin");
 	LoadGroup("LoadingFonts", 54);
+	WII_LOAD_STAGE("LoadingFonts done");
 	if (mLoadingFailed || mShutdown || mCloseRequest)
 	{
 		TodTraceAndLog("[LOAD] stopped after image/font resources failed=%d shutdown=%d close=%d",
@@ -1948,6 +2016,7 @@ void LawnApp::LoadingThreadProc()
 	aTimer.Start();
 
 	TodTraceAndLog("[LOAD] begin systems init");
+	WII_LOAD_STAGE("systems begin");
 	LAWN_LOAD_STAGE(LOAD_SYSTEMS);
 	mPoolEffect = new PoolEffect();
 	mPoolEffect->PoolEffectInitialize();
@@ -1957,6 +2026,7 @@ void LawnApp::LoadingThreadProc()
 	mReanimatorCache->ReanimatorCacheInitialize();
 	TodFoleyInitialize(gLawnFoleyParamArray, LENGTH(gLawnFoleyParamArray));
 	TodTraceAndLog("[LOAD] systems init ready");
+	WII_LOAD_STAGE("systems done");
 
 	TodTrace("loading '%s' %d ms", "stuff", (int)aTimer.GetDuration());
 	aTimer.Start();
@@ -1970,9 +2040,11 @@ void LawnApp::LoadingThreadProc()
 	TodHesitationTrace("trail");
 	
 	TodTraceAndLog("[LOAD] begin particles");
+	WII_LOAD_STAGE("particles begin");
 	LAWN_LOAD_STAGE(LOAD_PARTICLES);
 	TodParticleLoadDefinitions(gLawnParticleArray, LENGTH(gLawnParticleArray));
 	TodTraceAndLog("[LOAD] particles ready");
+	WII_LOAD_STAGE("particles done");
 	//aDuration = max(aTimer.GetDuration(), 0.0);
 	aTimer.Start();
 
@@ -1985,6 +2057,7 @@ void LawnApp::LoadingThreadProc()
 	TodTraceAndLog("[LOAD] purge before preload ready");
 
 	TodTraceAndLog("[LOAD] begin PreloadForUser");
+	WII_LOAD_STAGE("PreloadForUser begin");
 	LAWN_LOAD_STAGE(LOAD_PRELOAD);
 	PreloadForUser();
 	if (mLoadingFailed || mShutdown || mCloseRequest)
@@ -1994,6 +2067,7 @@ void LawnApp::LoadingThreadProc()
 		return;
 	}
 	TodTraceAndLog("[LOAD] PreloadForUser ready");
+	WII_LOAD_STAGE("PreloadForUser done");
 
 	//aDuration = max(aTimer.GetDuration(), 0.0);
 	aTimer.Start();
@@ -2004,10 +2078,12 @@ void LawnApp::LoadingThreadProc()
 	LAWN_LOAD_STAGE(LOAD_SOUNDS);
 	LoadGroup("LoadingSounds", 54);
 	TodTraceAndLog("[LOAD] LoadingSounds ready");
+	WII_LOAD_STAGE("LoadingSounds done");
 	TodTraceAndLog("[LOAD] final purge");
 	PurgeLazyImageBits();
 	LAWN_LOAD_STAGE(LOAD_DONE);
 	TodTraceAndLog("[LOAD] loading thread finished");
+	WII_LOAD_STAGE("finished");
 	TodHesitationTrace("finished loading");
 }
 
@@ -2670,11 +2746,18 @@ TodParticleSystem* LawnApp::AddTodParticle(float theX, float theY, int theRender
 
 ParticleSystemID LawnApp::ParticleGetID(TodParticleSystem* theParticle)
 {
+	// AddTodParticle returns nullptr when the particle-systems pool is full;
+	// several callers feed its result straight in here, and DataArrayGetID
+	// derefs it. ID 0 is the null sentinel ParticleTryToGet already handles.
+	if (theParticle == nullptr)
+		return ParticleSystemID::PARTICLESYSTEMID_NULL;
 	return (ParticleSystemID)mEffectSystem->mParticleHolder->mParticleSystems.DataArrayGetID(theParticle);
 }
 
 ReanimationID LawnApp::ReanimationGetID(Reanimation* theReanimation)
 {
+	if (theReanimation == nullptr)
+		return ReanimationID::REANIMATIONID_NULL;
 	return (ReanimationID)mEffectSystem->mReanimationHolder->mReanimations.DataArrayGetID(theReanimation);
 }
 
@@ -3779,5 +3862,4 @@ void LawnApp::UpdateRegisterInfo()
 {
 
 }
-
 

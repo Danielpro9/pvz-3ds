@@ -9,6 +9,51 @@
 
 static int gUserVersion = 12;
 
+template <typename T>
+static void SyncPottedPlantEnum(DataSync& theSync, T& theValue)
+{
+	int aValue = (int)theValue;
+	theSync.SyncLong(aValue);
+	theValue = (T)aValue;
+}
+
+static void SyncPottedPlantTime(DataSync& theSync, time_t& theValue)
+{
+	int64_t aValue = (int64_t)theValue;
+	uint32_t aLow = (uint32_t)(uint64_t)aValue;
+	uint32_t aHigh = (uint32_t)((uint64_t)aValue >> 32);
+	theSync.SyncLong(aLow);
+	theSync.SyncLong(aHigh);
+	aValue = (int64_t)(((uint64_t)aHigh << 32) | aLow);
+	theValue = (time_t)aValue;
+}
+
+// PottedPlant used to be persisted as a raw 88-byte Windows struct. Keep that
+// exact wire layout, but sync every value explicitly so it is independent of
+// the host byte order, time_t width, alignment, and enum representation.
+static void SyncPottedPlant(DataSync& theSync, PottedPlant& thePlant)
+{
+	SyncPottedPlantEnum(theSync, thePlant.mSeedType);
+	SyncPottedPlantEnum(theSync, thePlant.mWhichZenGarden);
+	theSync.SyncLong(thePlant.mX);
+	theSync.SyncLong(thePlant.mY);
+	SyncPottedPlantEnum(theSync, thePlant.mFacing);
+
+	uint32_t aPadding = 0;
+	theSync.SyncLong(aPadding);
+	SyncPottedPlantTime(theSync, thePlant.mLastWateredTime);
+	SyncPottedPlantEnum(theSync, thePlant.mDrawVariation);
+	SyncPottedPlantEnum(theSync, thePlant.mPlantAge);
+	theSync.SyncLong(thePlant.mTimesFed);
+	theSync.SyncLong(thePlant.mFeedingsPerGrow);
+	SyncPottedPlantEnum(theSync, thePlant.mPlantNeed);
+	theSync.SyncLong(aPadding);
+	SyncPottedPlantTime(theSync, thePlant.mLastNeedFulfilledTime);
+	SyncPottedPlantTime(theSync, thePlant.mLastFertilizedTime);
+	SyncPottedPlantTime(theSync, thePlant.mLastChocolateTime);
+	SyncPottedPlantTime(theSync, thePlant.mFutureAttribute[0]);
+}
+
 PlayerInfo::PlayerInfo()
 {
 	Reset();
@@ -74,7 +119,7 @@ void PlayerInfo::SyncDetails(DataSync& theSync)
 	TOD_ASSERT(mNumPottedPlants <= MAX_POTTED_PLANTS);
 	for (int i = 0; i < mNumPottedPlants; i++)
 	{
-		theSync.SyncBytes(&mPottedPlant[i], sizeof(PottedPlant));
+		SyncPottedPlant(theSync, mPottedPlant[i]);
 	}
 
 	// @Patoke: implemented

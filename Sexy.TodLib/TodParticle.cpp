@@ -698,6 +698,11 @@ void TodParticleEmitter::UpdateSpawning()
 	for (int i = 0; i < aSpawnCount; i++)
 	{
 		TodParticle* aParticle = SpawnParticle(i, aSpawnCount);
+		// SpawnParticle returns nullptr when the particles pool is full, and
+		// CrossFadeParticle derefs its argument unconditionally; once one spawn
+		// fails the rest of the batch will fail too, so stop here.
+		if (aParticle == nullptr)
+			break;
 		if (aCrossFadeEmitter != nullptr)
 			CrossFadeParticle(aParticle, aCrossFadeEmitter);
 	}
@@ -1264,9 +1269,20 @@ TodParticleHolder::~TodParticleHolder()
 //0x518900
 void TodParticleHolder::InitializeHolder()
 {
+#ifdef PS2_PLATFORM
+	// 512, not 1024: unlike reanims/attachments (see their InitializeHolder
+	// comments), every alloc path into these three pools degrades gracefully
+	// when full — AllocParticleSystemFromDef, SpawnParticle and the cross-fade
+	// paths all pre-check and skip the effect. On the ~26MB PS2 heap halving
+	// them trades worst-case spark density during huge hordes for ~190KB.
+	mParticleSystems.DataArrayInitialize(512U, "particle systems");
+	mEmitters.DataArrayInitialize(512U, "emitters");
+	mParticles.DataArrayInitialize(512U, "particles");
+#else
 	mParticleSystems.DataArrayInitialize(1024U, "particle systems");
 	mEmitters.DataArrayInitialize(1024U, "emitters");
 	mParticles.DataArrayInitialize(1024U, "particles");
+#endif
 	mParticleListNodeAllocator.Initialize(1024, sizeof(TodListNode<ParticleID>));
 	mEmitterListNodeAllocator.Initialize(1024, sizeof(TodListNode<ParticleEmitterID>));
 }

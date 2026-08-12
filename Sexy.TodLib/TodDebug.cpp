@@ -13,16 +13,19 @@
 // tracing here through the same global IO lock as the pak reader.
 #include "Ps2IoLock.h"
 #include "Ps2Trace.h" // Ps2BootStage: freeze forensics inside the log write
+#include "Ps2BigArena.h" // arena usage in the HESITATE heap traces
 
-// Master switch for the on-disk debug log (userdata/log.txt). Every line costs
-// an fopen+fwrite+fclose round-trip on the save device — deliberate (the last
-// line must survive a freeze), but thousands of lines per load are a real
-// slowdown on USB 1.1. At 0, log.txt only gets a one-line header saying
-// logging is off and every append is skipped; set to 1 (or -DPS2_FILE_LOG=1)
-// when hunting a freeze.
-#ifndef PS2_FILE_LOG
-#define PS2_FILE_LOG 0 // audio-dead-after-load bug resolved (mixer thread priority fix); logging back off for load speed
-#endif
+// Mixer park handshake (Ps2SoundManager.cpp) — forward-declared to keep the
+// PS2 sound header out of TodLib, same pattern as Reanimator/CreditScreen.
+namespace Sexy { void Ps2MixerIoPauseBegin(); void Ps2MixerIoPauseEnd(); }
+
+// The master switch for this log used to live here as PS2_FILE_LOG. It is now
+// SEXY_LOG_LEVEL in misc/SexyLog.h, which every platform shares; -DPS2_FILE_LOG
+// still works and still means what it did, because SexyLog.h honours it. The
+// reasoning behind defaulting PS2 to off has not changed: every line here is an
+// fopen+fwrite+fclose round-trip on the save device — deliberate, since the last
+// line has to survive a freeze — and thousands of them per load is a real
+// slowdown over USB 1.1.
 #endif
 
 #ifdef __SWITCH__
@@ -32,6 +35,7 @@
 #include "TodDebug.h"
 #include "TodCommon.h"
 #include "misc/Debug.h"
+#include "misc/SexyLog.h"
 #include "../SexyAppFramework/SexyAppBase.h"
 
 using namespace Sexy;
@@ -159,23 +163,10 @@ void TodLog(const char* theFormat, ...)
 
 void TodLogString(const char* theMsg)
 {
-#ifdef PS2_PLATFORM
-	TodAppendToDebugLog(theMsg);
-	return;
-#endif
-	FILE* f = fopen(gLogFileName, "a");
-	if (f == nullptr)
-	{
-		fprintf(stderr, __S("Failed to open log file '%s'\n"), gLogFileName);
-		return;
-	}
-
-	if (fwrite(theMsg, strlen(theMsg), 1, f) != 1)
-	{
-		fprintf(stderr, __S("Failed to write to log file\n"));
-	}
-
-	fclose(f);
+	// The per-platform branch that used to be here is gone: the sink knows how
+	// to reach the disk on each target, and this only has to decide that the
+	// message is ordinary per-line traffic rather than a fatal-path line.
+	SexyLogWrite(theMsg);
 }
 
 #ifdef PS2_PLATFORM
@@ -202,9 +193,10 @@ extern "C" void TodInitDebugLogForAppData(const char* theAppDataFolder)
 		static const char kHeader[] =
 			"[PS2 DEBUG] log.txt started from boot (build " __DATE__ " " __TIME__ ")\n";
 		fwrite(kHeader, 1, sizeof(kHeader) - 1, aFile);
-#if !PS2_FILE_LOG
+#if SEXY_LOG_LEVEL < 1
 		static const char kDisabled[] =
-			"[PS2 DEBUG] file logging disabled (PS2_FILE_LOG=0 in TodDebug.cpp)\n";
+			"[PS2 DEBUG] per-line logging disabled (SEXY_LOG_LEVEL=0); "
+			"fatal errors are still written\n";
 		fwrite(kDisabled, 1, sizeof(kDisabled) - 1, aFile);
 #endif
 		if (gEarlyLogBufferLen > 0)
@@ -235,12 +227,12 @@ extern "C" void TodInitDebugLogForAppData(const char* theAppDataFolder)
 	Ps2IoLockRelease();
 }
 
-extern "C" void TodAppendToDebugLog(const char* theMsg)
+// Unconditional append. Reached through SexyLogSinkWrite below, so it serves
+// both the SEXY_LOG_LEVEL-gated per-line traffic and the fatal-error path
+// (SexyLogForce / TodForceAppendToDebugLog), which must reach the disk even in
+// builds with logging off.
+static void TodAppendToDebugLogUnconditional(const char* theMsg)
 {
-#if !PS2_FILE_LOG
-	(void)theMsg;
-	return;
-#else
 	if (theMsg == nullptr)
 		return;
 
@@ -266,6 +258,16 @@ extern "C" void TodAppendToDebugLog(const char* theMsg)
 	//   PURPLE (64,0,64) = stuck inside fwrite
 	//   OLIVE  (64,64,0) = stuck inside fclose
 	//   DARK GREEN (0,64,0) = log write completed; freeze is in game code
+	//
+	// Park the mixer for the round-trip: this append is fio on the shared IOP,
+	// and a log line from unparked gameplay code (a TodTrace, a [SAND] print
+	// mid-texture-create) races the mixer's audsrv RPCs — the same wedge class
+	// as any other unparked fio, and it froze the credits on real hardware
+	// right after a lazy refault's parked logs ended. From already-parked
+	// contexts this nests for free; a stray gameplay line pays at most one
+	// mixer chunk (~46ms). The mixer thread itself never printfs (documented
+	// at Ps2CheckAudioGuards), so this cannot self-park.
+	Sexy::Ps2MixerIoPauseBegin();
 	Ps2IoLockAcquire();
 	Ps2BootStage(0, 0, 64);
 	FILE* aFile = fopen(gLogFileName, "a");
@@ -278,47 +280,63 @@ extern "C" void TodAppendToDebugLog(const char* theMsg)
 	}
 	Ps2BootStage(0, 64, 0);
 	Ps2IoLockRelease();
-#endif // PS2_FILE_LOG
+	Sexy::Ps2MixerIoPauseEnd();
 }
 
-// ---------------------------------------------------------------------------
-// printf/puts/putchar link wraps (CMakeLists: -Wl,--wrap=printf ...).
-//
-// The real printf on PS2 is a SIF fio RPC to the IOP TTY; on real hardware
-// that traffic competes with USB mass-storage and audsrv and can wedge the
-// console. Instead, every console print goes to <save prefix>/userdata/log.txt
-// through the persistent handle above — same file the original game used.
-// Lines printed before the save prefix is chosen land in the early-log buffer
-// and are replayed into log.txt when it opens.
-// ---------------------------------------------------------------------------
-
-extern "C" int __wrap_printf(const char* theFormat, ...)
+extern "C" void TodAppendToDebugLog(const char* theMsg)
 {
-	char aBuffer[1024];
-	va_list argList;
-	va_start(argList, theFormat);
-	int aCount = vsnprintf(aBuffer, sizeof(aBuffer), theFormat, argList);
-	va_end(argList);
-
-	if (aCount > 0)
-		TodAppendToDebugLog(aBuffer);
-	return aCount;
+	// Both of these are façades now: the gate and the formatting live in
+	// SexyLog, and TodAppendToDebugLogUnconditional below is reached through
+	// SexyLogSinkWrite like every other writer on this platform.
+	SexyLogWrite(theMsg);
 }
 
-extern "C" int __wrap_puts(const char* theString)
+extern "C" void TodForceAppendToDebugLog(const char* theMsg)
 {
-	TodAppendToDebugLog(theString != nullptr ? theString : "(null)");
-	TodAppendToDebugLog("\n");
-	return 0;
+	SexyLogForce(theMsg);
 }
 
-extern "C" int __wrap_putchar(int theChar)
-{
-	char aStr[2] = { (char)theChar, '\0' };
-	TodAppendToDebugLog(aStr);
-	return theChar;
-}
+// The printf/puts/putchar link wraps used to live here. They are in
+// SexyLog.cpp now, shared with the Wii, which needed exactly the same trick for
+// exactly the same reason: its stdout stops being read once GX owns the
+// framebuffer, so an unwrapped printf is a message written into a void.
 #endif
+
+// ---------------------------------------------------------------------------
+// The platform sink for everything except the Wii, which defines its own in
+// WiiEarlyInit.cpp. Both PS2 and desktop end up writing to gLogFileName, so
+// they share this one definition and differ only in how carefully they do it.
+// ---------------------------------------------------------------------------
+#ifndef WII_PLATFORM
+extern "C" void SexyLogSinkWrite(const char* theLine)
+{
+	if (theLine == nullptr)
+		return;
+
+#ifdef PS2_PLATFORM
+	// Open-append-close per line, the mixer park and the border-colour freeze
+	// forensics -- all unchanged, see TodAppendToDebugLogUnconditional.
+	TodAppendToDebugLogUnconditional(theLine);
+#else
+	// Desktop: the same append TodLogString has always done. stderr on failure
+	// rather than silence, because on a desktop somebody is watching a console.
+	if (gLogFileName[0] == '\0')
+		return;
+
+	FILE* aFile = fopen(gLogFileName, "a");
+	if (aFile == nullptr)
+	{
+		fprintf(stderr, __S("Failed to open log file '%s'\n"), gLogFileName);
+		return;
+	}
+
+	if (fwrite(theLine, strlen(theLine), 1, aFile) != 1)
+		fprintf(stderr, __S("Failed to write to log file\n"));
+
+	fclose(aFile);
+#endif
+}
+#endif // !WII_PLATFORM
 
 void TodTrace(const char* theFormat, ...)
 {
@@ -368,10 +386,15 @@ void TodHesitationTrace(const char* theFormat, ...)
 	va_end(argList);
 
 	Ps2IoLockAcquire();
-	printf("[HESITATE used=%.2fMB (%+.2fMB) free=%.2fMB] %s\n",
+	// free = fordblks: holes INSIDE the malloc arena, not sbrk headroom. A
+	// failed medium alloc with several MB "free" here means no hole was big
+	// enough — that is fragmentation, and the arena figure shows how much of
+	// the big-block reserve is carrying the load.
+	printf("[HESITATE used=%.2fMB (%+.2fMB) free=%.2fMB arena=%uKB/%uKB] %s\n",
 		(double)aUsed / (1024.0 * 1024.0),
 		(double)(aUsed - sLastUsed) / (1024.0 * 1024.0),
 		(double)aFree / (1024.0 * 1024.0),
+		Ps2BigUsedBytes() >> 10, PS2_BIG_ARENA_BYTES >> 10,
 		aBuffer);
 	Ps2IoLockRelease();
 	sLastUsed = aUsed;

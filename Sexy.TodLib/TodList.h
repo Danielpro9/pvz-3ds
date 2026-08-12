@@ -44,7 +44,7 @@ public:
 	TodAllocator*		mpAllocator;
 
 public:
-    TodList<T>()
+    TodList()
     {
         mHead = nullptr;
         mTail = nullptr;
@@ -52,7 +52,7 @@ public:
         mpAllocator = nullptr;
     }
 
-    ~TodList<T>()
+    ~TodList()
     {
         RemoveAll();
     }

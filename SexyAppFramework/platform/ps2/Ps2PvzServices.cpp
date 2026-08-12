@@ -10,6 +10,7 @@
 #include <sbv_patches.h>
 #include <libmc.h>
 #include <libcdvd.h>
+#include <libmouse.h>
 #include <delaythread.h>
 #include <stdio.h>
 #include <string.h>
@@ -38,6 +39,8 @@ extern const unsigned char usbmass_bd_irx[];
 extern const unsigned int  usbmass_bd_irx_size;
 extern const unsigned char cdfs_irx[];
 extern const unsigned int  cdfs_irx_size;
+extern const unsigned char ps2mouse_irx[];
+extern const unsigned int  ps2mouse_irx_size;
 
 // fileXio EE client (fileXio_rpc.h) + the ps2sdk libc hook that reroutes
 // newlib's open/mkdir/dopen/... through fileXio so iomanX-registered devices
@@ -49,6 +52,7 @@ int fileXioInit(void);
 static std::string s_savePrefix;
 static std::string s_resourcePrefix; // "" = cwd; "cdfs:/" on a CD/DVD boot
 static bool s_audioAvailable = false;
+static bool s_mouseAvailable = false;
 
 static void ps2_load_rom_module(const char* path)
 {
@@ -128,6 +132,29 @@ static bool ps2_init_usb_mass(bool theHostFs)
     // Legacy stack: usbd + usbhdfsd registers "mass:" on plain ioman.
     printf("[PS2] USB stack: legacy usbhdfsd\n");
     return ps2_load_embedded_module("usbhdfsd.irx", usbhdfsd_irx, usbhdfsd_irx_size);
+}
+
+static void ps2_init_usb_mouse()
+{
+    // ps2mouse.irx is a usbd client like the mass-storage drivers, so this
+    // runs after ps2_init_usb_mass has loaded usbd. A mouse plugged in later
+    // still works: usbd notifies the driver on enumeration.
+    //
+    // PS2MouseInit must only run when the module actually loaded — its bind
+    // loop spins forever waiting for an RPC server that would never register.
+    if (!ps2_load_embedded_module("ps2mouse.irx", ps2mouse_irx, ps2mouse_irx_size))
+        return;
+    if (PS2MouseInit() < 0)
+    {
+        printf("[PS2] mouse: RPC bind failed\n");
+        return;
+    }
+
+    // Relative deltas: the EE-side software cursor (Input.cpp) owns the
+    // position, so pad and mouse share one accumulator without jumps. ABS
+    // mode would keep a second position on the IOP that the pad can't see.
+    PS2MouseSetReadMode(PS2MOUSE_READMODE_DIFF);
+    s_mouseAvailable = true;
 }
 
 static bool ps2_wait_for_mass_device(int theMaxTenths)
@@ -255,6 +282,8 @@ void Ps2PvzInitServices(const char* theArgv0)
     if (ps2_init_usb_mass(aHostFs) && ps2_wait_for_mass_device(aCdBoot ? 20 : 100))
         ps2_try_usb_save_prefix();
 
+    ps2_init_usb_mouse();
+
     // cdfs is reachable through newlib whether IO is rerouted through fileXio
     // (real-hardware boot) or left on the classic ioman path (PCSX2 host boot),
     // since cdfs registers on ioman and iomanX mirrors it (as mc0:/rom0: do).
@@ -273,9 +302,10 @@ void Ps2PvzInitServices(const char* theArgv0)
     // If both fail the prefix stays empty = current directory (PCSX2 host fs,
     // or read-only media: saves fail gracefully but the game runs).
 
-    printf("[PS2] save prefix: '%s'  resource prefix: '%s'  audio: %s\n",
+    printf("[PS2] save prefix: '%s'  resource prefix: '%s'  audio: %s  mouse: %s\n",
            s_savePrefix.c_str(), s_resourcePrefix.c_str(),
-           s_audioAvailable ? "audsrv" : "none");
+           s_audioAvailable ? "audsrv" : "none",
+           s_mouseAvailable ? "ps2mouse" : "none");
 }
 
 const char* Ps2GetSavePrefix(void)
@@ -291,6 +321,11 @@ const char* Ps2GetResourcePrefix(void)
 bool Ps2AudioAvailable(void)
 {
     return s_audioAvailable;
+}
+
+bool Ps2MouseAvailable(void)
+{
+    return s_mouseAvailable;
 }
 
 #endif // PS2_PLATFORM

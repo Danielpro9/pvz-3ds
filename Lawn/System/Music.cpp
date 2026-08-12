@@ -5,9 +5,15 @@
 #include "paklib/PakInterface.h"
 #include "../../Sexy.TodLib/TodDebug.h"
 #include "../../Sexy.TodLib/TodCommon.h"
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 #include "sound/MusicInterface.h"
+#ifdef PS2_PLATFORM
 #include "platform/ps2/sound/Ps2SoundManager.h"
+#endif
+#ifdef WII_PLATFORM
+#include "platform/wii/sound/WiiSoundManager.h"
+#include "platform/wii/WiiEarlyInit.h"	// wiiLog; see StreamMusicLog below
+#endif
 #include <map>
 #include <stdlib.h>
 #include <stdio.h>
@@ -61,18 +67,57 @@ public:
 	virtual void Update() {}
 	virtual int GetMusicOrder(int) { return 0; }
 };
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 // ---------------------------------------------------------------------------
-// OGG music mode: the PS2 build has no mod (.mo3) playback. If the user drops
-// per-tune OGG files into sounds/ (PVZ soundtrack names, e.g. Grasswalk.ogg),
-// every tune plays its own streamed OGG instead of a mainmusic.mo3 order.
-// Drum/hihat layers and music bursts don't exist in this mode.
+// OGG music mode: neither console build has mod (.mo3) playback. If the user
+// drops per-tune OGG files into sounds/ (PVZ soundtrack names, e.g.
+// Grasswalk.ogg), every tune plays its own streamed OGG instead of a
+// mainmusic.mo3 order. Drum/hihat layers and music bursts don't exist in this
+// mode.
+//
+// Everything below is platform-neutral except the streaming entry points and
+// the mixer park, which each backend supplies under the shared names bound
+// here. Written for PS2 first; the Wii uses the same path over ASND.
 // ---------------------------------------------------------------------------
 
-static bool gPs2OggMusicMode = false;
-static bool gPs2OggMusicProbed = false;
+#ifdef PS2_PLATFORM
+	#define StreamMusicPlay			Sexy::Ps2MusicPlay
+	#define StreamMusicStop			Sexy::Ps2MusicStop
+	#define StreamMusicSetPaused	Sexy::Ps2MusicSetPaused
+	#define StreamMusicIsPlaying	Sexy::Ps2MusicIsPlaying
+	#define StreamMusicSetVolume	Sexy::Ps2MusicSetVolume
+	// On PS2 the software mixer shares the SIF link with file IO, so every read
+	// below has to park it or the IOP wedges on real hardware.
+	typedef Sexy::Ps2MixerIoPauseScope StreamMusicIoPauseScope;
+	#define STREAM_MUSIC_TAG "PS2"
+#else
+	#define StreamMusicPlay			Sexy::WiiMusicPlay
+	#define StreamMusicStop			Sexy::WiiMusicStop
+	#define StreamMusicSetPaused	Sexy::WiiMusicSetPaused
+	#define StreamMusicIsPlaying	Sexy::WiiMusicIsPlaying
+	#define StreamMusicSetVolume	Sexy::WiiMusicSetVolume
+	// Nothing to park on Wii: ASND is driven by the DSP over its own DMA and
+	// shares no bus with libfat, so file reads and playback do not collide.
+	struct StreamMusicIoPauseScope {};
+	#define STREAM_MUSIC_TAG "WII"
+	// printf only reaches stdout, which nothing reads once GX owns the
+	// framebuffer -- so on Wii every diagnostic below was being written into a
+	// void. wiiLog also reaches SYS_Report and the engine's userdata/log.txt.
+	// PS2 keeps printf:
+	// its logging goes elsewhere and its mixer/fio interaction is delicate
+	// enough that this is not the change to bundle it with.
+	#define StreamMusicLog			wiiLog
+#endif
+
+#ifndef StreamMusicLog
+#define StreamMusicLog			printf
+#endif
+
+static bool gStreamOggMusicMode = false;
+static bool gStreamOggMusicProbed = false;
 
 // Candidate file names (without "sounds/" or ".ogg") accepted for each tune.
-static const char* const* Ps2TuneOggNames(MusicTune theTune)
+static const char* const* TuneOggNames(MusicTune theTune)
 {
 	static const char* const kTitle[]    = { "CrazyDave", "Crazy Dave (Intro Theme)", "Crazy Dave", "crazydave", "MainTheme", "maintheme", 0 };
 	static const char* const kDay[]      = { "Grasswalk", "GrassWalk", "grasswalk", 0 };
@@ -107,9 +152,9 @@ static const char* const* Ps2TuneOggNames(MusicTune theTune)
 	}
 }
 
-static PFILE* Ps2OpenTuneOgg(MusicTune theTune, std::string& thePathOut)
+static PFILE* OpenTuneOgg(MusicTune theTune, std::string& thePathOut)
 {
-	const char* const* aNames = Ps2TuneOggNames(theTune);
+	const char* const* aNames = TuneOggNames(theTune);
 	if (aNames == 0)
 		return 0;
 
@@ -125,72 +170,95 @@ static PFILE* Ps2OpenTuneOgg(MusicTune theTune, std::string& thePathOut)
 
 // One-time detection: OGG music mode kicks in if the title theme (or, failing
 // that, Grasswalk) is present in sounds/.
-static bool Ps2OggMusicAvailable()
+static bool StreamOggMusicAvailable()
 {
-	if (!gPs2OggMusicProbed)
+	if (!gStreamOggMusicProbed)
 	{
-		// The probe fopens run on the main thread at title time, with the
-		// mixer live; park it so its audsrv RPCs can't collide with the fio
-		// on real hardware.
-		Sexy::Ps2MixerIoPauseScope aMixerPause;
-		gPs2OggMusicProbed = true;
+		// The probe fopens run on the main thread at title time. On PS2 the
+		// mixer is live and its audsrv RPCs must not collide with this fio;
+		// the scope is a no-op on Wii (see StreamMusicIoPauseScope).
+		StreamMusicIoPauseScope aMixerPause;
+		gStreamOggMusicProbed = true;
 		std::string aPath;
-		PFILE* aFile = Ps2OpenTuneOgg(MusicTune::MUSIC_TUNE_TITLE_CRAZY_DAVE_MAIN_THEME, aPath);
+		PFILE* aFile = OpenTuneOgg(MusicTune::MUSIC_TUNE_TITLE_CRAZY_DAVE_MAIN_THEME, aPath);
 		if (aFile == 0)
-			aFile = Ps2OpenTuneOgg(MusicTune::MUSIC_TUNE_DAY_GRASSWALK, aPath);
+			aFile = OpenTuneOgg(MusicTune::MUSIC_TUNE_DAY_GRASSWALK, aPath);
 		if (aFile != 0)
 		{
 			p_fclose(aFile);
-			gPs2OggMusicMode = true;
-			printf("[PS2] music: OGG soundtrack detected ('%s')\n", aPath.c_str());
+			gStreamOggMusicMode = true;
+			StreamMusicLog("[" STREAM_MUSIC_TAG "] music: OGG soundtrack detected ('%s')\n", aPath.c_str());
 		}
 		else
-			printf("[PS2] music: no OGG soundtrack found, falling back to mo3 path\n");
+			StreamMusicLog("[" STREAM_MUSIC_TAG "] music: no OGG soundtrack found, falling back to mo3 path\n");
 	}
-	return gPs2OggMusicMode;
+	return gStreamOggMusicMode;
 }
 
 // Reads the whole compressed OGG into RAM and hands it to the streamer.
-static bool Ps2PlayTuneOgg(MusicTune theTune)
+static bool PlayTuneOgg(MusicTune theTune)
 {
-	// This is a multi-MB read (seconds over USB 1.1) that runs with the mixer
-	// live — at the title, at the menu, and on every in-game tune change. Park
-	// the mixer for the whole load: on real hardware its unserialized audsrv
-	// RPCs colliding with such a long stretch of fio RPCs wedges the IOP.
-	// (Also keeps Ps2MusicStop below safe: parked mixer => direct teardown.)
-	Sexy::Ps2MixerIoPauseScope aMixerPause;
+	StreamMusicLog("[" STREAM_MUSIC_TAG "][MUS] request tune=%d\n", (int)theTune);
+	// This is a multi-MB read that runs at the title, at the menu, and on every
+	// in-game tune change. On PS2 it happens with the mixer live and over USB
+	// 1.1, so the whole load is parked: unserialized audsrv RPCs colliding with
+	// that long stretch of fio RPCs wedges the IOP. No-op on Wii.
+	// (Also keeps StreamMusicStop below safe: parked mixer => direct teardown.)
+	StreamMusicIoPauseScope aMixerPause;
 
 	std::string aPath;
-	PFILE* aFile = Ps2OpenTuneOgg(theTune, aPath);
+	PFILE* aFile = OpenTuneOgg(theTune, aPath);
 	if (aFile == 0 && theTune != MusicTune::MUSIC_TUNE_DAY_GRASSWALK)
 	{
 		// Missing track: fall back to the day theme rather than going silent.
-		printf("[PS2] music: no OGG for tune %d, trying Grasswalk\n", (int)theTune);
-		aFile = Ps2OpenTuneOgg(MusicTune::MUSIC_TUNE_DAY_GRASSWALK, aPath);
+		StreamMusicLog("[" STREAM_MUSIC_TAG "] music: no OGG for tune %d, trying Grasswalk\n", (int)theTune);
+		aFile = OpenTuneOgg(MusicTune::MUSIC_TUNE_DAY_GRASSWALK, aPath);
 	}
 	if (aFile == 0)
 	{
-		printf("[PS2] music: no OGG for tune %d\n", (int)theTune);
-		Sexy::Ps2MusicStop();
+		StreamMusicLog("[" STREAM_MUSIC_TAG "] music: no OGG for tune %d\n", (int)theTune);
+		StreamMusicStop();
 		return false;
 	}
 
 	p_fseek(aFile, 0, SEEK_END);
 	int aSize = p_ftell(aFile);
 	p_fseek(aFile, 0, SEEK_SET);
+	StreamMusicLog("[" STREAM_MUSIC_TAG "][MUS] opened '%s' size=%d\n", aPath.c_str(), aSize);
+	if (aSize <= 0)
+	{
+		p_fclose(aFile);
+		StreamMusicLog("[" STREAM_MUSIC_TAG "][MUS] invalid size for '%s'\n", aPath.c_str());
+		return false;
+	}
 	unsigned char* aData = (unsigned char*)malloc(aSize);
 	if (aData == 0)
 	{
 		p_fclose(aFile);
-		printf("[PS2] music: out of RAM for '%s' (%d bytes)\n", aPath.c_str(), aSize);
+		StreamMusicLog("[" STREAM_MUSIC_TAG "] music: out of RAM for '%s' (%d bytes)\n", aPath.c_str(), aSize);
 		return false;
 	}
-	p_fread(aData, 1, aSize, aFile);
+	int aRead = (int)p_fread(aData, 1, aSize, aFile);
 	p_fclose(aFile);
+	if (aRead != aSize)
+	{
+		StreamMusicLog("[" STREAM_MUSIC_TAG "][MUS] short read '%s': %d/%d\n",
+			aPath.c_str(), aRead, aSize);
+		free(aData);
+		return false;
+	}
 
 	bool aNoLoop = theTune == MusicTune::MUSIC_TUNE_CREDITS_ZOMBIES_ON_YOUR_LAWN;
-	return Sexy::Ps2MusicPlay(aData, aSize, !aNoLoop);  // takes ownership of aData
+	// A previous tune may have left the per-song stream volume near zero after
+	// fading out.  New tunes must start at full song volume; the options slider
+	// is applied independently as the stream's master volume.
+	StreamMusicSetVolume(1.0);
+	bool aStarted = StreamMusicPlay(aData, aSize, !aNoLoop);  // takes ownership of aData
+	StreamMusicLog("[" STREAM_MUSIC_TAG "][MUS] start '%s': %s\n",
+		aPath.c_str(), aStarted ? "ok" : "FAILED");
+	return aStarted;
 }
+#endif
 #else
 #include "sound/SDLMusicInterface.h"
 #endif
@@ -356,13 +424,13 @@ void Music::LoadSong(MusicFile theMusicFile, const std::string& theFileName)
 //0x45A8A0
 void Music::MusicTitleScreenInit()
 {
-#ifdef PS2_PLATFORM
-	// Same rule as MusicInit below: on PS2 NEVER fall through to the
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	// Same rule as MusicInit below: on console NEVER fall through to the
 	// LoadSong(".mo3") path. This runs on the MAIN thread at the first title
 	// draw — before the loading thread even starts — so a Mix_LoadMUS_RW hang
 	// here freezes the console right as the LOADING bar appears. No OGG
 	// soundtrack on the media => the title simply runs silent.
-	if (Ps2OggMusicAvailable())
+	if (StreamOggMusicAvailable())
 		MakeSureMusicIsPlaying(MusicTune::MUSIC_TUNE_TITLE_CRAZY_DAVE_MAIN_THEME);
 	return;
 #endif
@@ -377,21 +445,21 @@ void Music::MusicInit()
 	int aNumLoadingTasks = mApp->mCompletedLoadingThreadTasks + GetNumLoadingTasks();
 #endif
 
-#ifdef PS2_PLATFORM
-	// The PS2 build has NO .mo3 (mod) playback: music is per-tune OGG streaming
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	// Neither console build has .mo3 (mod) playback: music is per-tune OGG streaming
 	// only. When the OGG soundtrack is present it streams on demand; when it is
 	// absent we run SILENT. Either way we return here and MUST NOT fall through
 	// to the LoadSong(".mo3") path below.
 	//
 	// That mo3 path (LoadSong -> TodLoadMusic -> Mix_LoadMUS_RW) is unsupported
-	// on PS2 and HANGS the loading thread on real hardware — the console freezes
+	// on console and HANGS the loading thread on real hardware — the PS2 freezes
 	// at the static green LOAD_MUSICINIT border. It only appeared to "work" under
 	// PCSX2 because the OGGs resolve via host: there, so this fallback was never
 	// reached; on the real console the OGGs aren't on the media, OGG mode stays
 	// off, and the game wedged loading the mod.
-	if (!Ps2OggMusicAvailable())
+	if (!StreamOggMusicAvailable())
 	{
-		printf("[PS2] music: no OGG soundtrack found; running without music "
+		StreamMusicLog("[" STREAM_MUSIC_TAG "] music: no OGG soundtrack found; running without music "
 		       "(mo3 playback is not supported on PS2)\n");
 		mMusicDisabled = true;
 	}
@@ -431,9 +499,9 @@ void Music::MusicCreditScreenInit()
 //0x45ABB0
 void Music::StopAllMusic()
 {
-#ifdef PS2_PLATFORM
-	if (gPs2OggMusicMode)
-		Ps2MusicStop();
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	if (gStreamOggMusicMode)
+		StreamMusicStop();
 #endif
 	if (mMusicInterface != nullptr)
 	{
@@ -470,13 +538,13 @@ Mix_Music* Music::GetMusicHandle(MusicFile theMusicFile)
 //0x45AC70
 void Music::PlayFromOffset(MusicFile theMusicFile, int theOffset, double theVolume)
 {
-#ifdef PS2_PLATFORM
-	if (gPs2OggMusicMode)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	if (gStreamOggMusicMode)
 	{
 		// Only the credit screen calls this directly; the offset (a mod order)
 		// has no OGG equivalent, so restart the song from the top.
 		if (theMusicFile == MusicFile::MUSIC_FILE_CREDITS_ZOMBIES_ON_YOUR_LAWN)
-			Ps2PlayTuneOgg(MusicTune::MUSIC_TUNE_CREDITS_ZOMBIES_ON_YOUR_LAWN);
+			PlayTuneOgg(MusicTune::MUSIC_TUNE_CREDITS_ZOMBIES_ON_YOUR_LAWN);
 		return;
 	}
 #endif
@@ -520,15 +588,15 @@ void Music::PlayFromOffset(MusicFile theMusicFile, int theOffset, double theVolu
 //0x45ADB0
 void Music::PlayMusic(MusicTune theMusicTune, int theOffset, int theDrumsOffset)
 {
-#ifdef PS2_PLATFORM
-	if (gPs2OggMusicMode)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	if (gStreamOggMusicMode)
 	{
 		// One streamed OGG per tune; offsets/drum layers don't apply.
 		mCurMusicTune = theMusicTune;
 		mCurMusicFileMain = MusicFile::MUSIC_FILE_NONE;
 		mCurMusicFileDrums = MusicFile::MUSIC_FILE_NONE;
 		mCurMusicFileHihats = MusicFile::MUSIC_FILE_NONE;
-		Ps2PlayTuneOgg(theMusicTune);
+		PlayTuneOgg(theMusicTune);
 		return;
 	}
 #endif
@@ -934,18 +1002,18 @@ void Music::MusicUpdate()
 		else
 		{
 			float aFadeLevel = TodAnimateCurveFloat(mFadeOutDuration, 0, mFadeOutCounter, 1.0f, 0.0f, TodCurves::CURVE_LINEAR);
-#ifdef PS2_PLATFORM
-			if (gPs2OggMusicMode)
-				Ps2MusicSetVolume(aFadeLevel);
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+			if (gStreamOggMusicMode)
+				StreamMusicSetVolume(aFadeLevel);
 			else
 #endif
 			mMusicInterface->SetSongVolume(mCurMusicFileMain, aFadeLevel);
 		}
 	}
 
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 	// Burst/resync poke at mod-music orders that don't exist in OGG mode.
-	if (gPs2OggMusicMode)
+	if (gStreamOggMusicMode)
 		return;
 #endif
 	if (mApp->mBoard == nullptr || !mApp->mBoard->mPaused)
@@ -967,9 +1035,16 @@ void Music::MakeSureMusicIsPlaying(MusicTune theMusicTune)
 }
 
 //0x45B770
-void Music::StartGameMusic()
+void Music::StartGameMusic(Board* theBoard)
 {
-	TOD_ASSERT(mApp->mBoard);
+	Board* aBoard = theBoard != nullptr ? theBoard : mApp->mBoard;
+	TodTraceAndLog("[MUSIC] StartGameMusic board=%p appBoard=%p mode=%d",
+		(void*)aBoard, (void*)mApp->mBoard, (int)mApp->mGameMode);
+	if (aBoard == nullptr)
+	{
+		TodTraceAndLog("[MUSIC] StartGameMusic ignored: no active board");
+		return;
+	}
 
 	if (mApp->mGameMode == GameMode::GAMEMODE_CHALLENGE_ZEN_GARDEN || mApp->mGameMode == GameMode::GAMEMODE_TREE_OF_WISDOM)
 		MakeSureMusicIsPlaying(MusicTune::MUSIC_TUNE_ZEN_GARDEN);
@@ -985,13 +1060,13 @@ void Music::StartGameMusic()
 		StopAllMusic();
 	else if (mApp->IsScaryPotterLevel() || mApp->IsIZombieLevel())
 		MakeSureMusicIsPlaying(MusicTune::MUSIC_TUNE_PUZZLE_CEREBRAWL);
-	else if (mApp->mBoard->StageHasFog())
+	else if (aBoard->StageHasFog())
 		MakeSureMusicIsPlaying(MusicTune::MUSIC_TUNE_FOG_RIGORMORMIST);
-	else if (mApp->mBoard->StageIsNight())
+	else if (aBoard->StageIsNight())
 		MakeSureMusicIsPlaying(MusicTune::MUSIC_TUNE_NIGHT_MOONGRAINS);
-	else if (mApp->mBoard->StageHas6Rows())
+	else if (aBoard->StageHas6Rows())
 		MakeSureMusicIsPlaying(MusicTune::MUSIC_TUNE_POOL_WATERYGRAVES);
-	else if (mApp->mBoard->StageHasRoof())
+	else if (aBoard->StageHasRoof())
 		MakeSureMusicIsPlaying(MusicTune::MUSIC_TUNE_ROOF_GRAZETHEROOF);
 	else
 		MakeSureMusicIsPlaying(MusicTune::MUSIC_TUNE_DAY_GRASSWALK);
@@ -1000,17 +1075,17 @@ void Music::StartGameMusic()
 //0x45B930
 void Music::GameMusicPause(bool thePause)
 {
-#ifdef PS2_PLATFORM
-	if (gPs2OggMusicMode)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	if (gStreamOggMusicMode)
 	{
 		if (thePause && !mPaused && mCurMusicTune != MusicTune::MUSIC_TUNE_NONE)
 		{
-			Ps2MusicSetPaused(true);
+			StreamMusicSetPaused(true);
 			mPaused = true;
 		}
 		else if (!thePause && mPaused)
 		{
-			Ps2MusicSetPaused(false);
+			StreamMusicSetPaused(false);
 			mPaused = false;
 		}
 		return;

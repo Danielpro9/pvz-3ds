@@ -838,8 +838,26 @@ bool Sexy::FileExists(const std::string& theFileName)
 	*/
 }
 
+#if defined(PS2_PLATFORM)
+namespace Sexy { void Ps2MixerIoPauseBegin(); void Ps2MixerIoPauseEnd(); }
+namespace
+{
+	struct Ps2MkDirIoPause
+	{
+		Ps2MkDirIoPause()  { Sexy::Ps2MixerIoPauseBegin(); }
+		~Ps2MkDirIoPause() { Sexy::Ps2MixerIoPauseEnd(); }
+	};
+}
+#endif
+
 void Sexy::MkDir(const std::string& theDir)
 {
+#if defined(PS2_PLATFORM)
+	// Each mkdir() below is a fio RPC; PlayerInfo::SaveDetails and others
+	// call this on the main thread with the mixer live. Nesting under
+	// WriteBytesToFile's park is fine (the pause is refcounted).
+	Ps2MkDirIoPause aMixerPause;
+#endif
 	std::string aPath = theDir;
 
 	int aCurPos = 0;

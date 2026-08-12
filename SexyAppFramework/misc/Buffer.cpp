@@ -264,6 +264,22 @@ void Buffer::Clear()
 	mData.clear();
 }
 
+void Buffer::Reserve(int theBytes)
+{
+	if (theBytes <= 0 || (size_t)theBytes <= mData.capacity())
+		return;
+
+	// Round up to a power-of-two-ish capacity rather than reserving the exact
+	// figure asked for. reserve() allocates precisely what it is given, so an
+	// exact reserve leaves the very next append to reallocate again -- which is
+	// the quadratic behaviour reserve() exists to avoid.
+	size_t aCapacity = mData.capacity() < 1024 ? 1024 : mData.capacity();
+	while (aCapacity < (size_t)theBytes)
+		aCapacity *= 2;
+
+	mData.reserve(aCapacity);
+}
+
 void Buffer::WriteByte(uchar theByte)
 {	
 	if (mWriteBitPos % 8 == 0)
@@ -384,6 +400,14 @@ void Buffer::WriteBuffer(const ByteVector& theBuffer)
 
 void Buffer::WriteBytes(const uchar* theByte, int theCount)
 {
+	// One growth for the whole run instead of one per doubling inside the loop.
+	// Every growth needs the old and the new buffer live at the same time, so a
+	// long run of push_back walks the heap leaving a trail of ever-larger holes
+	// -- and on a heap that can no longer sbrk, that ladder is where the
+	// allocation actually dies (the Wii bad_alloc landed exactly here).
+	// The +1 covers WriteByte's unaligned case, which appends an extra byte.
+	Reserve((int)mData.size() + theCount + 1);
+
 	for (int i = 0; i < theCount; i++)
 		WriteByte(theByte[i]);
 }

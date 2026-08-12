@@ -551,19 +551,34 @@ void TodDrawStringMatrix(Graphics* g, const _Font* theFont, const SexyMatrix3& t
 			if (aCurPoolIdx >= POOL_SIZE)
 				break;
 
+			// A glyph this layer doesn't have never made it into
+			// mScaledCharImageRects, so find() returns end() — dereferencing
+			// it (as this used to) reads a garbage source rect and takes the
+			// renderer down. It happens with characters absent from the font
+			// (e.g., accented letters in translated credits lyrics: the Words
+			// reanim tracks are the main caller). The kerning lookup above
+			// already guards the same miss, and ImageFont::DrawStringEx
+			// degrades missing glyphs to an empty rect, so skip the draw but
+			// still advance the pen like a drawn glyph would.
+			auto aRectItr = aKernItr->mScaledCharImageRects.find(aChar);
+			if (aRectItr == aKernItr->mScaledCharImageRects.end())
+			{
+				if (aMaxXPos < aCurXPos + aSpacing + aCharWidth)
+				{
+					aMaxXPos = aCurXPos + aSpacing + aCharWidth;
+				}
+				continue;
+			}
+
 			RenderCommand* aRenderCommand = &gRenderCommandPool[aCurPoolIdx++];
 			aRenderCommand->mImage = aKernItr->mScaledImage;
 			aRenderCommand->mColor = aColor;
 			aRenderCommand->mDest[0] = anImageX;
 			aRenderCommand->mDest[1] = anImageY;
-			//aRenderCommand->mSrc[0] = aKernItr->mScaledCharImageRects[aChar].mX;
-			//aRenderCommand->mSrc[1] = aKernItr->mScaledCharImageRects[aChar].mY;
-			//aRenderCommand->mSrc[2] = aKernItr->mScaledCharImageRects[aChar].mWidth;
-			//aRenderCommand->mSrc[3] = aKernItr->mScaledCharImageRects[aChar].mHeight;
-			aRenderCommand->mSrc[0] = aKernItr->mScaledCharImageRects.find(aChar)->second.mX;
-			aRenderCommand->mSrc[1] = aKernItr->mScaledCharImageRects.find(aChar)->second.mY;
-			aRenderCommand->mSrc[2] = aKernItr->mScaledCharImageRects.find(aChar)->second.mWidth;
-			aRenderCommand->mSrc[3] = aKernItr->mScaledCharImageRects.find(aChar)->second.mHeight;
+			aRenderCommand->mSrc[0] = aRectItr->second.mX;
+			aRenderCommand->mSrc[1] = aRectItr->second.mY;
+			aRenderCommand->mSrc[2] = aRectItr->second.mWidth;
+			aRenderCommand->mSrc[3] = aRectItr->second.mHeight;
 			aRenderCommand->mMode = aLayer->mDrawMode;
 			aRenderCommand->mUseAlphaCorrection = aLayer->mUseAlphaCorrection;
 			aRenderCommand->mNext = nullptr;
@@ -702,6 +717,75 @@ void TodSandImageIfNeeded(Image* theImage)
 	/*if (TestBit(aImage->mD3DFlags, D3DIMAGEFLAG_SANDING))*/ // UB shift by a billion
 	if (aImage->mD3DFlags & D3DIMAGEFLAG_SANDING)
 	{
+#ifdef PS2_PLATFORM
+		// Hard size cap, checked before anything else: the palette pre-checks
+		// below only see the compact form, and when the image was already
+		// faulted+committed by the draw path the palette has been handed to
+		// the texture (zero-copy adoption) — so they cannot save a big image
+		// from the 32bpp expand. The 801x801 circle-fade wipe is 2.5MB
+		// contiguous that way (the repeated level-transition bad_alloc).
+		// Nothing legitimately sanded is near this size — the biggest real
+		// sprites are ~200x210 — and images this big are wipes/fades where
+		// edge halos are invisible anyway.
+		if (theImage->mWidth * theImage->mHeight > 300000)
+		{
+			aImage->mD3DFlags &= ~D3DIMAGEFLAG_SANDING;
+			return;
+		}
+		// Sanding only ever changes fully-transparent pixels, but the
+		// GetBits() below expands a compact image to 32bpp FIRST — for a
+		// 1400x600 background that is 3.36MB of resident heap spent to then
+		// discover (FixPixels' mHasTrans check) there was nothing to sand.
+		// Reanim definitions mark every referenced image, backgrounds
+		// included, so prove opacity from the compact representation and
+		// skip without expanding when possible:
+		//  - 24-bit RGB (JPG path) carries no alpha at all.
+		//  - a palette image with every CLUT entry at alpha 0xFF has no
+		//    transparent pixel to touch (tables are always 256 entries and
+		//    loaders fill unused ones opaque; a garbage/translucent entry
+		//    just falls through to the normal expand+sand path).
+		// A still-undecoded lazy image is faulted in first: that yields the
+		// compact form, whereas going straight to GetBits() would decode AND
+		// expand it in one step, defeating the whole check.
+		if (aImage->mBits == NULL && aImage->mColorTable == NULL && aImage->mRGBBits == NULL
+			&& aImage->mLazyUnloaded && gSexyAppBase != NULL)
+		{
+			gSexyAppBase->LoadLazyImageBits(aImage);
+		}
+		if (aImage->mBits == NULL && aImage->mRGBBits != NULL)
+		{
+			aImage->mD3DFlags &= ~D3DIMAGEFLAG_SANDING;
+			return;
+		}
+		if (aImage->mBits == NULL && aImage->mColorTable != NULL)
+		{
+			bool aAllOpaque = true;
+			// Second compact skip: alpha-only art (shadows, the 801x801
+			// circle-fade wipe) carries a single RGB across the whole CLUT
+			// (unused entries are loader filler 0xFF000000, so pure-black art
+			// still qualifies). Sanding writes the average of neighboring
+			// opaque RGB into transparent pixels — with one RGB everywhere
+			// that average is that same RGB, a no-op. Skipping matters: the
+			// expand below is one w*h*4 contiguous block, 2.5MB for the wipe,
+			// which was the 2026-07-18 level-transition bad_alloc.
+			bool aSingleRGB = true;
+			unsigned long aFirstRGB = aImage->mColorTable[0] & 0x00FFFFFFUL;
+			for (int i = 0; i < 256; i++)
+			{
+				if ((aImage->mColorTable[i] & 0xFF000000UL) != 0xFF000000UL)
+					aAllOpaque = false;
+				if ((aImage->mColorTable[i] & 0x00FFFFFFUL) != aFirstRGB)
+					aSingleRGB = false;
+				if (!aAllOpaque && !aSingleRGB)
+					break;
+			}
+			if (aAllOpaque || aSingleRGB)
+			{
+				aImage->mD3DFlags &= ~D3DIMAGEFLAG_SANDING;
+				return;
+			}
+		}
+#endif
 		aImage->GetBits();  // force a lazy decode; FixPixels bails out on null bits
 		FixPixelsOnAlphaEdgeForBlending(theImage);
 		((MemoryImage*)theImage)->mD3DFlags &= ~D3DIMAGEFLAG_SANDING; // Unset the sanding flag
@@ -1192,79 +1276,19 @@ bool TodLoadNextResource()
 //0x513330
 bool TodResourceManager::TodLoadNextResource()
 {
-	//GetTickCount();
 	TodHesitationTrace("preres");
+	return ResourceManager::LoadNextResource();
+}
 
-	while (mCurResGroupListItr != mCurResGroupList->end())
+void TodResourceManager::ResourceLoadedHook(BaseRes* theRes)
+{
+	if (theRes->mType == ResType_Image)
 	{
-		BaseRes* aRes = *mCurResGroupListItr;
-		if (aRes->mFromProgram)
-			continue;
-
-		switch (aRes->mType)
-		{
-		case ResType_Image:
-		{
-			ImageRes* anImageRes = (ImageRes*)aRes;
-			if ((GLImage*)anImageRes->mImage != nullptr)
-			{
-				mCurResGroupListItr++;
-				continue;
-			}
-
-			break;
-		}
-
-		case ResType_Sound:
-		{
-			SoundRes* aSoundRes = (SoundRes*)aRes;
-			if (aSoundRes->mSoundId != -1)
-			{
-				mCurResGroupListItr++;
-				continue;
-			}
-
-			break;
-		}
-
-		case ResType_Font:
-		{
-			FontRes* aFontRes = (FontRes*)aRes;
-			if (aFontRes->mFont != nullptr)
-			{
-				mCurResGroupListItr++;
-				continue;
-			}
-
-			break;
-		}
-		}
-
-#ifdef PS2_PLATFORM
-		// Name each resource BEFORE loading it: log.txt lines hit the disk
-		// immediately (TodDebug.cpp), so after a freeze the last line of the
-		// log is the exact item that wedged the console.
-		printf("[RES] %d '%s'\n", (int)aRes->mType, aRes->mPath.c_str());
-#endif
-		if (!LoadNextResource())
-			break;
-
-		if (aRes->mType == ResType::ResType_Image)
-		{
-			ImageRes* anImageRes = (ImageRes*)aRes;
-			Image* aImage = (Image*)anImageRes->mImage;
-			if (aImage != nullptr)
-			{
-				TodMarkImageForSanding(aImage);
-			}
-		}
-
-		//GetTickCount();
-		TodHesitationTrace("resource '%s'", aRes->mPath.c_str());
-		return true;
+		Image* anImage = (Image*)((ImageRes*)theRes)->mImage;
+		if (anImage != nullptr)
+			TodMarkImageForSanding(anImage);
 	}
-
-	return false;
+	TodHesitationTrace("resource '%s'", theRes->mPath.c_str());
 }
 
 bool TodFindImagePath(Image* theImage, std::string* thePath)

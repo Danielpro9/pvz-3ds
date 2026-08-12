@@ -163,7 +163,7 @@ public:
 	void							FinishTimesUpDialog();
 	void							KillBoard();
 #ifdef LOW_MEMORY
-	void							PurgeUnusedAssets();
+	void							PurgeUnusedAssets(bool theForce = false);
 	bool							ShouldPurgeAssets();
 #endif
 	void							MakeNewBoard();

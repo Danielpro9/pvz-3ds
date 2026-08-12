@@ -77,7 +77,16 @@ void GLImage::PurgeBits()
 
 	CommitBits();
 #ifdef PS2_PLATFORM
-	if (mBits != NULL || (mColorTable == NULL && mColorIndices == NULL && mRGBBits == NULL))
+	// An undecoded lazy stub also matches "no bits and no compact form", but
+	// GetBits() on it decodes the whole file AND expands the palette to one
+	// contiguous w*h*4 block — 3.36MB for a 1400x600 background — which the
+	// 3D-path MemoryImage::PurgeBits below then leaves resident (mD3DData is
+	// still NULL so it purges nothing). Under board-load fragmentation that
+	// expansion is a fatal bad_alloc (ra=MemoryImage::GetBits). A stub is
+	// already as purged as it gets: leave the decode to its first draw, which
+	// uploads straight from the compact form.
+	if (!mLazyUnloaded &&
+		(mBits != NULL || (mColorTable == NULL && mColorIndices == NULL && mRGBBits == NULL)))
 #endif
 	GetBits();
 

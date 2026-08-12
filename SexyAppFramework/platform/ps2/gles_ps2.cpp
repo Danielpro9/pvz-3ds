@@ -26,6 +26,25 @@
 // yo soy chad lo pongo como define en vez de un .bat cual hay!!
 #define PS2_ENABLE_PSMT8 1
 
+// PSMT4: 4-bit indexed, 16-color CLUT — half the GS VRAM and half the CPU
+// re-upload copy of PSMT8. Strictly LOSSLESS opt-in: a texture only becomes
+// T4 when its content already fits in 16 palette entries (an asset quantized
+// with `pngquant 16`, or a piece whose palettize yields <=16 colors). The
+// engine never degrades a 256-color image to 16 on its own, so flipping this
+// off only costs VRAM, never quality. Requires PS2_ENABLE_PSMT8.
+// Bitmask so the two entry points can be bisected independently:
+//   0 = off, 1 = only palette assets (ps2_gles_tex_image_indexed),
+//   2 = only auto-detected RGBA pieces (glTexImage2D), 3 = both.
+#define PS2_ENABLE_PSMT4 3
+
+// Tail canaries on every texture CPU buffer (cpuIdx/clut), verified at upload
+// and release. Chasing the heap-corruption TLB crash: if a [GUARD] line names
+// a texture, the overflow is in (or right next to) that texture's own buffers;
+// if the heap still corrupts with no [GUARD] trip, the wild writer lives
+// elsewhere and the T4 allocation sizes merely reshuffled its victim. Set to 0
+// once the hunt is over.
+#define PS2_TEX_GUARD 1
+
 typedef float Mat4[16]; 
 
 // chupamela
@@ -876,7 +895,116 @@ void glBindTexture(GLenum, GLuint id) {
     st.boundTex = id;
 }
 
+// Whether a texture id has usable storage. Creation failures (palettize OOM,
+// CLUT/index alloc, null source pixels) clear te.valid but the game-side
+// TextureData has no other way to see them: glTexImage2D is void. Without
+// this audit hook a TextureData seals itself over a dead piece and every draw
+// of that sprite is skipped silently forever — the post-credits "menu with
+// black holes". TextureData::CreateTextures now audits its pieces with this
+// and re-arms a retry instead.
+extern "C" int ps2_gles_tex_valid(GLuint id) {
+    return (id > 0 && id < PS2_MAX_TEX && s_tex[id].valid) ? 1 : 0;
+}
+
+#ifdef PS2_ENABLE_PSMT8
+// ---- T8/T4 palette-layout helpers ----
+//
+// A texture's CLUT layout and index packing depend on its PSM: T8 stores 256
+// CSM1-swizzled entries and one index per byte; T4 stores 16 entries (the
+// CSM1 bit3/bit4 swizzle only applies to 256-entry CLUTs — 16-entry CLUTs
+// are linear) and packs two indices per byte, low nibble first. Every reader
+// and writer of cpuIdx/clut below goes through these so both formats share
+// one code path.
+static inline bool ps2_tex_is_t4(const PS2Tex& te) {
+    return te.gs.PSM == GS_PSM_T4;
+}
+static inline int ps2_clut_count(const PS2Tex& te) {
+    return ps2_tex_is_t4(te) ? 16 : 256;
+}
+static inline int ps2_clut_pos(const PS2Tex& te, int i) {
+    return ps2_tex_is_t4(te) ? i : Ps2ClutCsm1Pos(i);
+}
+static inline u8 ps2_idx_get(const PS2Tex& te, int p) {
+    if (ps2_tex_is_t4(te)) {
+        u8 b = te.cpuIdx[p >> 1];
+        return (p & 1) ? (u8)(b >> 4) : (u8)(b & 0x0F);
+    }
+    return te.cpuIdx[p];
+}
+static inline void ps2_idx_put(PS2Tex& te, int p, u8 v) {
+    if (ps2_tex_is_t4(te)) {
+        u8& b = te.cpuIdx[p >> 1];
+        b = (p & 1) ? (u8)((b & 0x0F) | (v << 4)) : (u8)((b & 0xF0) | (v & 0x0F));
+    } else {
+        te.cpuIdx[p] = v;
+    }
+}
+
+#if PS2_TEX_GUARD
+// 16 bytes of 0xC5 after every cpuIdx/clut buffer, verified at upload,
+// sub-update and release. See the PS2_TEX_GUARD comment at the top.
+#define PS2_TEX_GUARD_BYTES 16
+static inline u32 ps2_tex_idx_bytes(const PS2Tex& te) {
+    u32 npx = te.gs.Width * te.gs.Height;
+    return ps2_tex_is_t4(te) ? (npx >> 1) : npx;
+}
+static void ps2_tex_stamp_guard(void* buf, u32 theSize) {
+    if (buf) memset((u8*)buf + theSize, 0xC5, PS2_TEX_GUARD_BYTES);
+}
+static void ps2_tex_check_guards(const PS2Tex& te, GLuint id, const char* where) {
+    static int sTrips = 0;
+    if (sTrips >= 8 || te.gs.Width == 0)
+        return;
+    const u8* aTails[2] = { nullptr, nullptr };
+    const char* aNames[2] = { "cpuIdx", "clut" };
+    if (te.cpuIdx) aTails[0] = (const u8*)te.cpuIdx + ps2_tex_idx_bytes(te);
+    if (te.clut)   aTails[1] = (const u8*)te.clut + (u32)ps2_clut_count(te) * sizeof(u32);
+    for (int b = 0; b < 2; b++) {
+        if (!aTails[b]) continue;
+        for (int i = 0; i < PS2_TEX_GUARD_BYTES; i++) {
+            if (aTails[b][i] != 0xC5) {
+                printf("[GUARD] %s overrun tex id=%u %ux%u psm=0x%02x at %s (+%d = 0x%02x)\n",
+                       aNames[b], (unsigned)id, (unsigned)te.gs.Width, (unsigned)te.gs.Height,
+                       (unsigned)te.gs.PSM, where, i, aTails[b][i]);
+                sTrips++;
+                break;
+            }
+        }
+    }
+}
+#else
+#define PS2_TEX_GUARD_BYTES 0
+static inline void ps2_tex_stamp_guard(void*, u32) {}
+static inline void ps2_tex_check_guards(const PS2Tex&, GLuint, const char*) {}
+#endif
+
+#if PS2_ENABLE_PSMT4
+// GS host->local IMAGE transfers for PSMT4 want even-aligned rows; texture
+// pieces are power-of-two wide, so requiring a multiple of 8 (>= 8) keeps
+// rows byte-aligned with margin and only excludes tiny or exotic pitches,
+// which fall back to T8.
+static inline bool ps2_t4_width_ok(GLsizei tw) {
+    return tw >= 8 && (tw & 7) == 0;
+}
+// Repack 1-byte indices as nibble pairs (low nibble = even texel). Returns
+// null on OOM; the caller keeps the T8 layout in that case.
+static u8* ps2_pack_t4_indices(const u8* idx, u32 npx) {
+    u8* packed = (u8*)memalign(64, (npx >> 1) + PS2_TEX_GUARD_BYTES);
+    if (!packed) return nullptr;
+    for (u32 p = 0; p < npx; p += 2)
+        packed[p >> 1] = (u8)((idx[p] & 0x0F) | ((idx[p + 1] & 0x0F) << 4));
+    ps2_tex_stamp_guard(packed, npx >> 1);
+    return packed;
+}
+#endif
+#endif
+
 static void ps2_tex_release_storage(PS2Tex& te) {
+#ifdef PS2_ENABLE_PSMT8
+    // The id recovers from the slot address; release runs on respecify and
+    // delete, so a long-lived texture gets its tail checked at least once.
+    ps2_tex_check_guards(te, (GLuint)(&te - s_tex), "release");
+#endif
     if (te.cpuMem) { free(te.cpuMem); te.cpuMem = nullptr; }
     Ps2VramFree(te.gs.Vram, te.vramSize);
     te.vramSize = 0;
@@ -977,27 +1105,49 @@ void glTexImage2D(GLenum, GLint level, GLint, GLsizei w, GLsizei h,
     te.gs.Height = (u32)th;
     npx = (u32)(tw * th);
 
-    te.cpuIdx = (u8*)memalign(64, npx);
-    te.clut   = (u32*)memalign(64, 256 * sizeof(u32));
+    te.cpuIdx = (u8*)memalign(64, npx + PS2_TEX_GUARD_BYTES);
+    ps2_tex_stamp_guard(te.cpuIdx, npx);
     u32 paletteLin[256];
     int nPal = 0;
-    if (te.cpuIdx && te.clut)
+    if (te.cpuIdx)
         nPal = Ps2PalettizeT8(palSrc, npx, te.cpuIdx, paletteLin);
     if (shrunk) free(shrunk);
     if (nPal <= 0) {
         printf("[PS2] glTexImage2D: palettize failed for %dx%d tex id=%u\n", w, h, id);
         if (te.cpuIdx) { free(te.cpuIdx); te.cpuIdx = nullptr; }
-        if (te.clut)   { free(te.clut);   te.clut = nullptr; }
         te.valid = false;
         return;
     }
-    // CSM1 wants index bits 3/4 swapped in storage; unused entries stay
-    // transparent black.
-    memset(te.clut, 0, 256 * sizeof(u32));
-    for (int i = 0; i < nPal; i++)
-        te.clut[Ps2ClutCsm1Pos(i)] = paletteLin[i];
 
-    te.gs.PSM             = GS_PSM_T8;
+    te.gs.PSM = GS_PSM_T8;
+#if (PS2_ENABLE_PSMT4 & 2)
+    // A piece that palettized to <=16 colors is exactly representable in
+    // T4: repack the indices and halve both the GS VRAM and this CPU copy.
+    if (nPal <= 16 && ps2_t4_width_ok(tw)) {
+        u8* packed = ps2_pack_t4_indices(te.cpuIdx, npx);
+        if (packed) {
+            free(te.cpuIdx);
+            te.cpuIdx = packed;
+            te.gs.PSM = GS_PSM_T4;
+        }
+    }
+#endif
+
+    // CSM1 wants index bits 3/4 swapped in storage for 256-entry CLUTs;
+    // T4's 16-entry CLUT is linear. Unused entries stay transparent black.
+    const int aClutCount = ps2_clut_count(te);
+    te.clut = (u32*)memalign(64, aClutCount * sizeof(u32) + PS2_TEX_GUARD_BYTES);
+    if (te.clut == nullptr) {
+        printf("[PS2] glTexImage2D: CLUT alloc failed for %dx%d tex id=%u\n", w, h, id);
+        free(te.cpuIdx); te.cpuIdx = nullptr;
+        te.valid = false;
+        return;
+    }
+    ps2_tex_stamp_guard(te.clut, aClutCount * sizeof(u32));
+    memset(te.clut, 0, aClutCount * sizeof(u32));
+    for (int i = 0; i < nPal; i++)
+        te.clut[ps2_clut_pos(te, i)] = paletteLin[i];
+
     te.gs.ClutPSM         = GS_PSM_CT32;
     te.gs.Clut            = (u32*)te.clut;
     te.gs.ClutStorageMode = GS_CLUT_STORAGE_CSM1;
@@ -1089,17 +1239,21 @@ static u32 ps2_argb_to_psmct32(GLuint argb)
 
 static void ps2_copy_indexed_clut(PS2Tex& te, const GLuint* palette, GLsizei paletteCount)
 {
-    memset(te.clut, 0, 256 * sizeof(u32));
+    // Capacity and layout follow the texture's PSM (see the helpers above);
+    // a T4 texture only ever references indices < 16, so capping a 256-slot
+    // source palette at 16 entries loses nothing it can address.
+    const int aClutCount = ps2_clut_count(te);
+    memset(te.clut, 0, aClutCount * sizeof(u32));
     if (!palette)
         return;
 
     if (paletteCount < 0)
         paletteCount = 0;
-    if (paletteCount > 256)
-        paletteCount = 256;
+    if (paletteCount > aClutCount)
+        paletteCount = aClutCount;
 
     for (int i = 0; i < paletteCount; i++)
-        te.clut[Ps2ClutCsm1Pos(i)] = ps2_argb_to_psmct32(palette[i]);
+        te.clut[ps2_clut_pos(te, i)] = ps2_argb_to_psmct32(palette[i]);
 
     if (te.remap) {
         free(te.remap);
@@ -1136,28 +1290,54 @@ extern "C" void ps2_gles_tex_image_indexed(GLsizei w, GLsizei h,
     const GLsizei tw = ((w - 1) >> shrink) + 1;
     const GLsizei th = ((h - 1) >> shrink) + 1;
     const u32 npx = (u32)(tw * th);
-    te.cpuIdx = (u8*)memalign(64, npx);
-    te.clut   = (u32*)memalign(64, 256 * sizeof(u32));
+
+    te.gs.PSM = GS_PSM_T8;
+#if (PS2_ENABLE_PSMT4 & 1)
+    // Content whose indices all fit under 16 (e.g. an asset quantized with
+    // `pngquant 16`) is exactly representable in T4. Scan the FULL-RES source
+    // rect, not the shrunk copy: sub-updates nearest-sample the same index
+    // space on their own lattice, so any texel they might pick must be < 16
+    // too or a packed nibble would silently wrap to a wrong color.
+    if (ps2_t4_width_ok(tw)) {
+        u8 aMaxIdx = 0;
+        for (int row = 0; row < h; row++) {
+            const GLubyte* aRow = indices + row * srcPitch;
+            for (int col = 0; col < w; col++)
+                if (aRow[col] > aMaxIdx)
+                    aMaxIdx = aRow[col];
+        }
+        if (aMaxIdx < 16)
+            te.gs.PSM = GS_PSM_T4;
+    }
+#endif
+    const bool aIsT4 = ps2_tex_is_t4(te);
+
+    const u32 aIdxBytes = aIsT4 ? (npx >> 1) : npx;
+    te.cpuIdx = (u8*)memalign(64, aIdxBytes + PS2_TEX_GUARD_BYTES);
+    te.clut   = (u32*)memalign(64, ps2_clut_count(te) * sizeof(u32) + PS2_TEX_GUARD_BYTES);
     if (!te.cpuIdx || !te.clut) {
         ps2_tex_release_storage(te);
         te.valid = false;
         return;
     }
+    ps2_tex_stamp_guard(te.cpuIdx, aIdxBytes);
+    ps2_tex_stamp_guard(te.clut, ps2_clut_count(te) * sizeof(u32));
 
-    if (shrink == 0) {
+    if (!aIsT4 && shrink == 0) {
         for (int row = 0; row < h; row++)
             memcpy(te.cpuIdx + row * w, indices + row * srcPitch, w);
     } else {
+        // ps2_idx_put writes every position, so the read-modify-write on the
+        // packed T4 buffer never leaves an uninitialized nibble behind.
         for (GLsizei dy = 0; dy < th; dy++)
             for (GLsizei dx = 0; dx < tw; dx++)
-                te.cpuIdx[dy * tw + dx] = indices[(dy << shrink) * srcPitch + (dx << shrink)];
+                ps2_idx_put(te, dy * tw + dx, indices[(dy << shrink) * srcPitch + (dx << shrink)]);
     }
     ps2_copy_indexed_clut(te, palette, paletteCount);
     te.shrink = (u8)shrink;
 
     te.gs.Width           = (u32)tw;
     te.gs.Height          = (u32)th;
-    te.gs.PSM             = GS_PSM_T8;
     te.gs.ClutPSM         = GS_PSM_CT32;
     te.gs.Clut            = (u32*)te.clut;
     te.gs.ClutStorageMode = GS_CLUT_STORAGE_CSM1;
@@ -1182,7 +1362,7 @@ extern "C" void ps2_gles_tex_sub_image_indexed(GLint xoff, GLint yoff,
     if (id == 0 || id >= PS2_MAX_TEX || !s_tex[id].valid) return;
 
     PS2Tex& te = s_tex[id];
-    if (!te.cpuIdx || !te.clut || te.gs.PSM != GS_PSM_T8) return;
+    if (!te.cpuIdx || !te.clut || (te.gs.PSM != GS_PSM_T8 && te.gs.PSM != GS_PSM_T4)) return;
 
     // Incoming coords are in full-res image space; the stored copy may be
     // shrunk (te.shrink). Translate to storage space with nearest sampling.
@@ -1197,19 +1377,43 @@ extern "C" void ps2_gles_tex_sub_image_indexed(GLint xoff, GLint yoff,
         dh = (GLint)te.gs.Height - dy0;
     if (dw <= 0 || dh <= 0) return;
 
+    if (ps2_tex_is_t4(te)) {
+        // Creation only chose T4 after proving every index of the piece was
+        // < 16, so this can only trip if the image was re-palettized to more
+        // colors at runtime and then sub-updated. A packed nibble would wrap
+        // an index >= 16 to a wrong color; keep the stale texels instead.
+        for (int row = 0; row < dh; row++)
+            for (int col = 0; col < dw; col++)
+                if (indices[(row << s) * srcPitch + (col << s)] >= 16) {
+                    static bool sWarned = false;
+                    if (!sWarned) {
+                        sWarned = true;
+                        printf("[PS2] T4 sub-update with index >= 16 (tex id=%u) — update skipped\n", id);
+                    }
+                    return;
+                }
+    }
+
     for (int row = 0; row < dh; row++)
         for (int col = 0; col < dw; col++)
-            te.cpuIdx[(dy0 + row) * (int)te.gs.Width + dx0 + col] =
-                indices[(row << s) * srcPitch + (col << s)];
+            ps2_idx_put(te, (dy0 + row) * (int)te.gs.Width + dx0 + col,
+                indices[(row << s) * srcPitch + (col << s)]);
 
     if (palette)
         ps2_copy_indexed_clut(te, palette, paletteCount);
 
+    ps2_tex_check_guards(te, id, "subimage-indexed");
     te.dirtyUpload = true;
 #else
     (void)xoff; (void)yoff; (void)w; (void)h; (void)indices; (void)indexPitch; (void)palette; (void)paletteCount;
 #endif
 }
+
+// Texture uploads emit their DMA chain into the same Os_Queue as draws, but
+// through lib code the glDrawArrays-side guard never sees — a post-purge
+// refault burst (dozens of pieces re-uploading in one frame) must not be able
+// to run the now-small pool past its end. Reserve headroom before each upload.
+static void ps2_gs_queue_guard(int vertexCount);
 
 // Make the texture resident in GS VRAM (allocate + DMA upload) if it is not
 // already, and flush a pending glTexSubImage2D re-send. If VRAM is full, the
@@ -1217,6 +1421,9 @@ extern "C" void ps2_gles_tex_sub_image_indexed(GLint xoff, GLint yoff,
 // a texture too large for the arena itself can still fail (returns false ->
 // caller skips the draw).
 static bool ps2_tex_ensure_resident(PS2Tex& te) {
+#ifdef PS2_ENABLE_PSMT8
+    ps2_tex_check_guards(te, (GLuint)(&te - s_tex), "upload");
+#endif
     if (te.uploaded) {
         if (te.dirtyUpload) {
 #ifdef PS2_ENABLE_PSMT8
@@ -1224,6 +1431,7 @@ static bool ps2_tex_ensure_resident(PS2Tex& te) {
 #else
             te.gs.Mem = (u32*)te.cpuMem;
 #endif
+            ps2_gs_queue_guard(0);
             gsKit_texture_upload(gsGlobal, &te.gs);
             te.gs.Mem = nullptr;
             te.dirtyUpload = false;
@@ -1233,8 +1441,11 @@ static bool ps2_tex_ensure_resident(PS2Tex& te) {
 
 #ifdef PS2_ENABLE_PSMT8
     if (!te.cpuIdx || !te.clut) return false;
-    u32 vsz  = gsKit_texture_size(te.gs.Width, te.gs.Height, GS_PSM_T8);
-    u32 cvsz = gsKit_texture_size(16, 16, GS_PSM_CT32);
+    // T4 halves the texture VRAM; its CLUT is 16 CT32 entries, which gsKit
+    // uploads as an 8x2 image (vs 16x16 for T8's 256 entries).
+    u32 vsz  = gsKit_texture_size(te.gs.Width, te.gs.Height, te.gs.PSM);
+    u32 cvsz = ps2_tex_is_t4(te) ? gsKit_texture_size(8, 2, GS_PSM_CT32)
+                                 : gsKit_texture_size(16, 16, GS_PSM_CT32);
 #else
     if (!te.cpuMem) return false;
     u32 vsz  = gsKit_texture_size(te.gs.Width, te.gs.Height, te.gs.PSM);
@@ -1263,6 +1474,7 @@ static bool ps2_tex_ensure_resident(PS2Tex& te) {
 #else
             te.gs.Mem = (u32*)te.cpuMem;
 #endif
+            ps2_gs_queue_guard(0);
             gsKit_texture_upload(gsGlobal, &te.gs);
             te.gs.Mem = nullptr;
             te.uploaded = true;
@@ -1275,8 +1487,20 @@ static bool ps2_tex_ensure_resident(PS2Tex& te) {
             // VRAM full: send everything queued so far to the GS (in-order GIF
             // consumption means those draws still see their textures), then
             // rewind the arena and retry with a clean slate.
-            printf("[PS2] texture VRAM full (%ux%u) — flushing + rewinding arena\n",
-                   (unsigned)te.gs.Width, (unsigned)te.gs.Height);
+            //
+            // Log throttled: when a scene's texture working set exceeds the
+            // arena (the credits movie does) this fires every frame, and each
+            // line is a parked USB round-trip that would slideshow the scene
+            // it reports on. Was also the credits freeze on real HW before the
+            // log writer parked the mixer: this printf mid-draw with the mixer
+            // live wedged the IOP, deterministically, right after background1's
+            // re-upload — the log ended at its "[LAZY] committed" line.
+            static u32 sVramFullCount = 0;
+            sVramFullCount++;
+            if (sVramFullCount <= 3 || (sVramFullCount & 63) == 0)
+                printf("[PS2] texture VRAM full (%ux%u) — flush+rewind #%u\n",
+                       (unsigned)te.gs.Width, (unsigned)te.gs.Height,
+                       (unsigned)sVramFullCount);
             if (gsGlobal->Os_Queue && gsGlobal->CurQueue == gsGlobal->Os_Queue) {
                 gsKit_queue_exec(gsGlobal);
                 gsKit_queue_reset(gsGlobal->Os_Queue);
@@ -1295,12 +1519,13 @@ static bool ps2_tex_ensure_resident(PS2Tex& te) {
 // in practice just terrain.png's animated water/lava/fire tiles, whose
 // colors come from the original texture and therefore hit the palette).
 static u8 ps2_t8_remap_color(PS2Tex& te, u16 v) {
+    const int aClutCount = ps2_clut_count(te);
     if (!te.remap) {
         te.remap = (u16*)malloc(65536 * sizeof(u16));
         if (!te.remap) return 0;
         memset(te.remap, 0xFF, 65536 * sizeof(u16));
-        for (int i = 0; i < 256; i++) {
-            u16 c = ps2_psmct32_to_psmct16(te.clut[Ps2ClutCsm1Pos(i)]);
+        for (int i = 0; i < aClutCount; i++) {
+            u16 c = ps2_psmct32_to_psmct16(te.clut[ps2_clut_pos(te, i)]);
             if (te.remap[c] == 0xFFFF)
                 te.remap[c] = (u16)i;
         }
@@ -1308,8 +1533,8 @@ static u8 ps2_t8_remap_color(PS2Tex& te, u16 v) {
     u16 m = te.remap[v];
     if (m != 0xFFFF) return (u8)m;
     int best = 0, bestD = 0x7FFFFFFF;
-    for (int i = 0; i < 256; i++) {
-        int d = Ps2Ct16Dist(v, te.clut[Ps2ClutCsm1Pos(i)]);
+    for (int i = 0; i < aClutCount; i++) {
+        int d = Ps2Ct16Dist(v, te.clut[ps2_clut_pos(te, i)]);
         if (d < bestD) { bestD = d; best = i; }
     }
     te.remap[v] = (u16)best;
@@ -1340,7 +1565,7 @@ void glTexSubImage2D(GLenum, GLint level, GLint xoff, GLint yoff,
             for (int col = 0; col < w; col++) {
                 int dp = (yoff+row)*(int)te.gs.Width + (xoff+col);
                 int sp = row*w + col;
-                te.cpuIdx[dp] = ps2_t8_remap_color(te, Ps2RgbaToPsmct16(src + sp * 4));
+                ps2_idx_put(te, dp, ps2_t8_remap_color(te, Ps2RgbaToPsmct16(src + sp * 4)));
             }
         }
     } else {
@@ -1366,7 +1591,7 @@ void glTexSubImage2D(GLenum, GLint level, GLint xoff, GLint yoff,
                 }
                 if (n == 0) continue;
                 u8 out[4] = { (u8)(rSum/n), (u8)(gSum/n), (u8)(bSum/n), (u8)(aSum/n) };
-                te.cpuIdx[dy * (int)te.gs.Width + dx] = ps2_t8_remap_color(te, Ps2RgbaToPsmct16(out));
+                ps2_idx_put(te, dy * (int)te.gs.Width + dx, ps2_t8_remap_color(te, Ps2RgbaToPsmct16(out)));
             }
         }
     }
@@ -1408,6 +1633,9 @@ void glTexSubImage2D(GLenum, GLint level, GLint xoff, GLint yoff,
             }
         }
     }
+#endif
+#ifdef PS2_ENABLE_PSMT8
+    ps2_tex_check_guards(te, id, "subimage-rgba");
 #endif
     // Don't re-send the whole texture per call: terrain.png gets several
     // animated-tile updates per frame (water/lava/fire), and each upload here
@@ -1453,8 +1681,10 @@ static long s_dbg_queue_flush = 0; // mid-frame GS queue flushes (near-overflow)
 #endif
 
 // GS oneshot queue budget. gsKit does NOT bounds-check pool_cur: a frame
-// whose GIF packets exceed the 3MB Os_Queue pool writes straight past the
-// end into the C++ heap (observed: Tile vtable corruption -> crash). Before
+// whose GIF packets exceed the Os_Queue pool (384KB per buffer, set in
+// Window.cpp — that size is only safe because this guard exists) writes
+// straight past the end into the C++ heap (observed: Tile vtable corruption
+// -> crash). Before
 // queueing a draw call, estimate its worst-case packet size; if it might not
 // fit in the remaining pool, kick the queue to the GS now and reset it —
 // the same exec+reset the frame loop does, so rendering just continues into
@@ -1523,6 +1753,44 @@ extern "C" void ps2_dbg_draw_dump() {
            s_dbg_3d_calls, s_dbg_3d_prim, s_dbg_3d_clip, s_dbg_3d_backface, s_dbg_queue_flush);
     s_dbg_3d_calls = s_dbg_3d_prim = s_dbg_3d_clip = s_dbg_3d_backface = s_dbg_queue_flush = 0;
 #endif
+}
+
+// CPU texture RAM census, one line every ~15s (called per frame from
+// GLInterface::Flush). The lossless levers (T8/T4 indices, half-res, palette
+// zero-copy) are all in place; the remaining 4x reduction would be a lossy
+// 256-color quantization of the CT32 population — pieces whose content
+// exceeds 256 unique colors. This line says whether that is worth building,
+// and also surfaces the 128KB-per-texture glTexSubImage2D remap memos.
+extern "C" void ps2_dbg_tex_census(void) {
+    static int s_censusFrames = 0;
+    if (++s_censusFrames < 900) return;
+    s_censusFrames = 0;
+    unsigned int ct32 = 0, idx8 = 0, idx4 = 0, cluts = 0, remaps = 0;
+    int nCt32 = 0, nIdx = 0, nRemap = 0;
+    unsigned int topB = 0; int topW = 0, topH = 0;
+    for (int i = 1; i < PS2_MAX_TEX; i++) {
+        PS2Tex& te = s_tex[i];
+        if (!te.valid) continue;
+        unsigned int px = (unsigned int)te.gs.Width * (unsigned int)te.gs.Height;
+#ifdef PS2_ENABLE_PSMT8
+        if (te.cpuIdx) {
+            nIdx++;
+            if (ps2_tex_is_t4(te)) idx4 += px / 2; else idx8 += px;
+            if (te.clut)  cluts  += ps2_tex_is_t4(te) ? 64u : 1024u;
+            if (te.remap) { remaps += 65536u * (unsigned int)sizeof(u16); nRemap++; }
+            continue;
+        }
+#endif
+        if (te.cpuMem) {
+            nCt32++;
+            unsigned int b = px * 4;
+            ct32 += b;
+            if (b > topB) { topB = b; topW = te.gs.Width; topH = te.gs.Height; }
+        }
+    }
+    printf("[TEXMEM] ct32=%uKB in %d pieces (top %dx%d=%uKB) | idx8=%uKB idx4=%uKB clut=%uKB | remap=%uKB in %d\n",
+           ct32 >> 10, nCt32, topW, topH, topB >> 10,
+           idx8 >> 10, idx4 >> 10, cluts >> 10, remaps >> 10, nRemap);
 }
 
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
@@ -1977,7 +2245,7 @@ extern "C" int ps2_gles_read_texture(GLuint id, unsigned int* dst, int dstPitchP
         for (int col = 0; col < w; col++) {
 #ifdef PS2_ENABLE_PSMT8
             if (!te.cpuIdx || !te.clut) return 0;
-            u32 v = te.clut[Ps2ClutCsm1Pos(te.cpuIdx[(row >> s) * te.gs.Width + (col >> s)])];
+            u32 v = te.clut[ps2_clut_pos(te, ps2_idx_get(te, (row >> s) * te.gs.Width + (col >> s)))];
             unsigned int a = (v >> 24) & 0xFF;
             a = (a >= 0x80) ? 0xFF : (a << 1);
             unsigned int b = (v >> 16) & 0xFF;

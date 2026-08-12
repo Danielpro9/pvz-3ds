@@ -17,6 +17,10 @@ using namespace Sexy;
 
 extern GSGLOBAL* gsGlobal;
 
+// gles_ps2.cpp: whether a texture id has usable storage; the piece audit in
+// TextureData::CreateTextures is the only caller (see the comment there).
+extern "C" int ps2_gles_tex_valid(GLuint id);
+
 static int gMinTextureWidth;
 static int gMinTextureHeight;
 static int gMaxTextureWidth;
@@ -532,6 +536,7 @@ TextureData::TextureData()
 	//mPalette = NULL;
 	mPixelFormat = PixelFormat_Unknown;
 	mImageFlags = 0;
+	mCreateFailCooldown = 0;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -646,6 +651,21 @@ void TextureData::CreateTextures(MemoryImage *theImage)
 	if (theImage->mLazyUnloaded)
 		gSexyAppBase->LoadLazyImageBits(theImage);
 
+	// A file-backed image with no pixel data here is a failed decode (OOM).
+	// Bail before CopyImageToTexture's GetBits() allocates the w*h*4 blank
+	// fallback with the THROWING operator new — for a 1400x600 background
+	// that throw was fatal ([FATAL] std::bad_alloc, ra=MemoryImage::GetBits).
+	// mPixelFormat stays Unknown so this draw is skipped; the re-arm plus the
+	// per-image cooldown (CheckCreateTextures) retries the decode once memory
+	// has been freed instead of leaving a permanently black image.
+	if (theImage->mBits == NULL && theImage->mColorIndices == NULL &&
+		theImage->mRGBBits == NULL && !theImage->mFilePath.empty())
+	{
+		theImage->mLazyUnloaded = true;
+		mCreateFailCooldown = 64;
+		return;
+	}
+
 	if (theImage->mBits != NULL)
 #endif
 		theImage->DeleteSWBuffers(); // don't need these buffers for 3d drawing
@@ -716,6 +736,39 @@ void TextureData::CreateTextures(MemoryImage *theImage)
 		}
 	}
 
+#ifdef PS2_PLATFORM
+	// Audit the pieces before sealing. The shim's glTexImage2D is void, so a
+	// piece whose creation failed inside it (palettize OOM, CLUT/index alloc)
+	// is only visible here. Sealing over a dead piece made the sprite black
+	// forever: its draws skip (CreateImageTexture returns false on Unknown),
+	// nothing marks the image changed, and CheckCreateTextures never rebuilds
+	// — the post-credits "menu with black holes". Tear down instead and leave
+	// the format Unknown so the cooldown retry rebuilds once the memory
+	// pressure that killed the allocation has passed.
+	for (i = 0; i < (int)mTextures.size(); i++)
+	{
+		if (!ps2_gles_tex_valid(mTextures[i].mTexture))
+		{
+			static int sInvalidLogs = 0;
+			if (sInvalidLogs < 16)
+			{
+				++sInvalidLogs;
+				printf("[PS2] texture piece %d/%d failed for '%s' (%dx%d) — retry in 64 draws\n",
+					i, (int)mTextures.size(),
+					theImage->mFilePath.empty() ? "(runtime)" : theImage->mFilePath.c_str(),
+					theImage->mWidth, theImage->mHeight);
+			}
+			ReleaseTextures();
+			mPixelFormat = PixelFormat_Unknown;
+			mCreateFailCooldown = 64;
+			// Keep the image's CPU bits (skip the lazy purge below): the
+			// retry can then rebuild without re-decoding, and the pressure
+			// valve can still purge them like any other clean lazy image.
+			return;
+		}
+	}
+#endif
+
 	mWidth = theImage->mWidth;
 	mHeight = theImage->mHeight;
 	mBitsChangedCount = theImage->mBitsChangedCount;
@@ -734,7 +787,20 @@ void TextureData::CreateTextures(MemoryImage *theImage)
 void TextureData::CheckCreateTextures(MemoryImage *theImage)
 {
 	if(mPixelFormat==PixelFormat_Unknown || theImage->mWidth != mWidth || theImage->mHeight != mHeight || theImage->mBitsChangedCount != mBitsChangedCount || theImage->mD3DFlags != mImageFlags)
+	{
+#ifdef PS2_PLATFORM
+		// After a failed creation, wait out the cooldown before retrying:
+		// each attempt can be a full re-decode, and per-draw retries while
+		// memory is still tight would thrash the loader instead of letting
+		// the purges free room first.
+		if (mCreateFailCooldown > 0)
+		{
+			mCreateFailCooldown--;
+			return;
+		}
+#endif
 		CreateTextures(theImage);
+	}
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1462,6 +1528,8 @@ bool GLInterface::PreDraw()
 	return true;
 }
 
+extern "C" void ps2_dbg_tex_census(void);
+
 void GLInterface::Flush()
 {
 	gNumVertices = 0;
@@ -1472,10 +1540,28 @@ void GLInterface::Flush()
 	gsKit_sync_flip(gsGlobal);
 	if (gsGlobal->Os_Queue)
 		gsKit_queue_reset(gsGlobal->Os_Queue);
+	ps2_dbg_tex_census();
 }
 
 bool GLInterface::CreateImageTexture(MemoryImage *theImage)
 {
+	// A NULL image here comes from a game-side draw of a null/dangling Image*
+	// (the Blt entry points cast blindly). Dereferencing it doesn't stop at the
+	// first TLB miss on PCSX2 — loads return garbage and execution staggers on
+	// until a jump to a garbage address kills the EE. Skip the draw and log the
+	// caller (feed the ra to addr2line) so the source is attributable.
+	if (theImage == NULL)
+	{
+		static int sNullDrawLogs = 0;
+		if (sNullDrawLogs < 8)
+		{
+			++sNullDrawLogs;
+			printf("[PS2] CreateImageTexture(NULL) — draw skipped, ra=%p\n",
+				__builtin_return_address(0));
+		}
+		return false;
+	}
+
 	bool wantPurge = false;
 
 	if(theImage->mD3DData==NULL)
@@ -1490,8 +1576,16 @@ bool GLInterface::CreateImageTexture(MemoryImage *theImage)
 	}
 
 	TextureData *aData = (TextureData*)theImage->mD3DData;
+
+	// Pin across texture creation: any OOM rescue below (lazy decode, pak
+	// record buffer, atlas) can run a full PurgeLazyImages, and unpinned this
+	// image qualifies — Remove3DData would delete aData while its own
+	// CheckCreateTextures is on the stack (use-after-free, heap corruption).
+	bool aWasPinned = theImage->mLazyPinned;
+	theImage->mLazyPinned = true;
 	aData->CheckCreateTextures(theImage);
-	
+	theImage->mLazyPinned = aWasPinned;
+
 	if (wantPurge)
 		theImage->PurgeBits();
 

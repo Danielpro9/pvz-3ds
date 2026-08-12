@@ -20,9 +20,22 @@ On-disk format (every byte XORed with 0xF7):
 
 Usage:
     python tools/build_pak.py <media_root> [-o OUTPUT] [--dirs DIR [DIR ...]]
+                              [--exclude DIR [DIR ...]]
 
 Example:
     python tools/build_pak.py "PVZ PS2 PORT V1.0 OptiJuegos/Version ELF"
+
+Big-endian targets (Wii) must NOT ship compiled/. Those .compiled files are raw
+struct dumps written by whichever machine compiled them, so their byte order and
+ABI padding are baked in; a pak built on x86 is unreadable on PowerPC. The
+schema CRC in DefinitionReadCompiledFile catches this and falls back to the XML
+source, but shipping files that can only ever be rejected just wastes space:
+
+    python tools/build_pak.py <wii_media_root> --exclude compiled
+
+Either let the Wii build compile from XML on first boot (it has the RAM the PS2
+did not) and cache the result, or generate compiled/ with the Wii toolchain and
+pack that instead.
 
 After building, the script re-parses its own output exactly the way
 AddPakFile does and byte-compares every record against the source file.
@@ -140,10 +153,19 @@ def main():
     ap.add_argument("root", help="media root (folder holding images/, reanim/, ...)")
     ap.add_argument("-o", "--output", default=None, help="output pak path (default: <root>/main.pak)")
     ap.add_argument("--dirs", nargs="+", default=DEFAULT_DIRS, help=f"folders to pack (default: {' '.join(DEFAULT_DIRS)})")
+    ap.add_argument("--exclude", nargs="+", default=[], metavar="DIR",
+                    help="drop these folders from the packed set (e.g. --exclude compiled for Wii)")
     args = ap.parse_args()
 
+    unknown = [d for d in args.exclude if d not in args.dirs]
+    if unknown:
+        sys.exit(f"error: --exclude names a folder that is not being packed: {' '.join(unknown)}")
+    dirs = [d for d in args.dirs if d not in args.exclude]
+    if not dirs:
+        sys.exit("error: --exclude removed every folder; nothing to pack")
+
     out_path = args.output or os.path.join(args.root, "main.pak")
-    files = build_pak(args.root, out_path, args.dirs)
+    files = build_pak(args.root, out_path, dirs)
     verify_pak(args.root, out_path, files)
 
 

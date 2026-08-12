@@ -11,12 +11,14 @@
 #include "paklib/PakInterface.h"
 #include "misc/PerfTimer.h"
 #include "misc/XMLParser.h"
+#include "misc/BigBlockArena.h"
 #include "../Resources.h"
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 #ifdef PS2_PLATFORM
 #include "Ps2IoLock.h"
+#endif
 #include <new>
 #endif
-
 DefSymbol gTrailFlagDefSymbols[] = {  //0x69E150
     { 0, "Loops" },                 { -1, nullptr }
 };
@@ -314,13 +316,38 @@ unsigned int DefinitionGetSize(DefMap* theDefMap, void* theDefinition) {
 
 void* DefinitionAlloc(int theSize)
 {
-#ifdef PS2_PLATFORM
-    // A throwing new here is a silent console freeze. No purge/retry: this
-    // can run while holding Ps2IoLock and PurgeLazyImageBits takes the GL
-    // crit sect first (lock-order inversion). Just make the OOM visible.
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+    // A throwing new here is a silent console freeze, so allocate nothrow
+    // first and give large transient definition buffers one cleanup retry.
+    // Big staging blobs can still die to fragmentation alone: the Award
+    // Screen's Zombie.reanim.compiled needed 1.19MB contiguous with 11MB
+    // free and no hole big enough. Escalate those to the full purge — it
+    // also drops GS textures and the GL shim's per-texture CPU copies, the
+    // mid-arena residents that carve the heap into confetti after a heavy
+    // screen — and retry once. Gated to big sizes on purpose: the big
+    // callers (uncompress staging, deep-copy arrays) all run after
+    // DefinitionReadCompiledFile released Ps2IoLock, so the purge's
+    // canonical mCritSect->Ps2IoLock order holds; the small under-IoLock
+    // allocation (the compressed file buffer) never escalates, keeping the
+    // documented lock-order inversion out. PurgeLazyImages degrades itself
+    // to bits-only off the main thread, and definition loading never has
+    // CreateTextures on the stack, so no TextureData can be torn down
+    // beneath a live caller.
     void* aPtr = operator new[](theSize, std::nothrow);
+    if (aPtr == NULL && theSize >= (256 << 10) && gSexyAppBase != NULL)
+    {
+        printf("[DEF] OOM allocating %d bytes — full purge + retry\n", theSize);
+        gSexyAppBase->PurgeLazyImages();
+        aPtr = operator new[](theSize, std::nothrow);
+    }
     if (aPtr == NULL)
         printf("[DEF] OOM allocating %d bytes\n", theSize);
+#ifdef WII_PLATFORM
+    // Preserve Wii's normal fatal path (including requested-size/caller
+    // diagnostics) if the cleanup could not produce a contiguous block.
+    if (aPtr == NULL)
+        aPtr = operator new[](theSize);
+#endif
 #else
     void* aPtr = operator new[](theSize);
 #endif
@@ -552,7 +579,7 @@ uint DefinitionCalcHash(DefMap* theDefMap)
 }
 
 //0x444500 : UnCompress(&theUncompressedSize, theCompressedBufferSize, esi = *theCompressedBuffer)
-void* DefinitionUncompressCompiledBuffer(void* theCompressedBuffer, size_t theCompressedBufferSize, size_t& theUncompressedSize, const SexyString& theCompiledFilePath)
+void* DefinitionUncompressCompiledBuffer(void* theCompressedBuffer, size_t theCompressedBufferSize, size_t& theUncompressedSize, const SexyString& theCompiledFilePath, void* theDestination, size_t theDestinationCapacity)
 {
     // theCompressedBuffer 的前两个四字节存有特殊数据，此处检测其长度是否足够 8 字节（即 2 个四字节）
     if (theCompressedBufferSize < 8)
@@ -568,7 +595,11 @@ void* DefinitionUncompressCompiledBuffer(void* theCompressedBuffer, size_t theCo
         return nullptr;
     }
     
-    Bytef* aUncompressedBuffer = (Bytef*)DefinitionAlloc(aHeader->mUncompressedSize);
+    if (theDestination != nullptr && theDestinationCapacity < aHeader->mUncompressedSize)
+        return nullptr;
+    Bytef* aUncompressedBuffer = theDestination != nullptr
+        ? (Bytef*)theDestination
+        : (Bytef*)DefinitionAlloc(aHeader->mUncompressedSize);
     Bytef* aSrc = (Bytef*)((intptr_t)theCompressedBuffer + sizeof(CompressedDefinitionHeader));  // 实际解压数据从第 3 个四字节开始
     // BuGFIXX!!
     ulong aUncompressedSizeResult = aHeader->mUncompressedSize;  // 用作出参的未压缩数据实际长度
@@ -603,7 +634,17 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
     p_fseek(pFile, 0, 2);  // 将读取位置的指针移动至文件末尾
     size_t aCompressedSize = p_ftell(pFile);  // 此时获取到的偏移量即为整个文件的大小
     p_fseek(pFile, 0, 0);  // 再把读取位置的指针移回文件开头
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+    // The compressed input is transient too. Keeping it on the general heap
+    // left a 1.19 MB contiguous allocation exposed to fragmentation before
+    // the uncompressed scratch buffer was even created.
+    ConsoleScratchBuffer aCompressedScratch(aCompressedSize);
+    const bool aScratchOwnsCompressedBuffer = (bool)aCompressedScratch;
+    void* aCompressedBuffer = aScratchOwnsCompressedBuffer
+        ? aCompressedScratch.Data() : DefinitionAlloc(aCompressedSize);
+#else
     void* aCompressedBuffer = DefinitionAlloc(aCompressedSize);
+#endif
     // 读取文件，并判断实际读取的大小是否为完整的文件大小，若不等则判断为读取失败
     bool aReadCompressedFailed = p_fread(aCompressedBuffer, sizeof(char), aCompressedSize, pFile) != aCompressedSize;
     p_fclose(pFile);  // 关闭资源文件流并释放 pFile 占用的内存
@@ -612,19 +653,47 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
 #endif
     if (aReadCompressedFailed) { // 判断是否读取成功
         TodTrace(__S("Failed to read compiled file: %s\n"), theCompiledFilePath.c_str());
-        free(aCompressedBuffer);
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+        if (!aScratchOwnsCompressedBuffer)
+            delete[] (char *)aCompressedBuffer;
+#else
+        delete[] (char *)aCompressedBuffer;
+#endif
         return false;
     }
 
     size_t aUncompressedSize;
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+    CompressedDefinitionHeader* aCompressedHeader = (CompressedDefinitionHeader*)aCompressedBuffer;
+    size_t aScratchSize = aCompressedSize >= sizeof(CompressedDefinitionHeader) &&
+        aCompressedHeader->mCookie == 0xDEADFED4L
+        ? aCompressedHeader->mUncompressedSize : 0;
+    ConsoleScratchBuffer aDefinitionScratch(aScratchSize);
+    const bool aScratchOwnsUncompressedBuffer = (bool)aDefinitionScratch;
+    void* aUncompressedBuffer = DefinitionUncompressCompiledBuffer(
+        aCompressedBuffer, aCompressedSize, aUncompressedSize, theCompiledFilePath,
+        aDefinitionScratch.Data(), aDefinitionScratch.Size());
+#else
     void* aUncompressedBuffer = DefinitionUncompressCompiledBuffer(aCompressedBuffer, aCompressedSize, aUncompressedSize, theCompiledFilePath);
+#endif
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+    if (!aScratchOwnsCompressedBuffer)
+        delete[] (char *)aCompressedBuffer;
+#else
     delete[] (char *)aCompressedBuffer;
-    if (!aUncompressedBuffer) return false;
+#endif
+    if (!aUncompressedBuffer)
+        return false;
     
     uint aDefHash = DefinitionCalcHash(theDefMap);  // 计算 CRC 校验值，后将用于检测数据的完整性
     if (aUncompressedSize < theDefMap->mDefSize + sizeof(uint)) {
         TodTrace(__S("Compiled file size too small: %s\n"), theCompiledFilePath.c_str());
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+        if (!aScratchOwnsUncompressedBuffer)
+            delete[] (char *)aUncompressedBuffer;
+#else
         delete[] (char *)aUncompressedBuffer;
+#endif
         return false;
     } // 检测解压数据的长度是否足够“定义数据 + 一个校验值记录数据”的长度
 
@@ -635,7 +704,12 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
     SMemR(aBufferPtr, &aCashHash, sizeof(uint));  // 读取记录的 CRC 校验值
     if (aCashHash != aDefHash) {
         TodTrace(__S("Compiled file schema wrong: %s\n"), theCompiledFilePath.c_str());
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+        if (!aScratchOwnsUncompressedBuffer)
+            delete[] (char *)aUncompressedBuffer;
+#else
         delete[] (char *)aUncompressedBuffer;
+#endif
         return false;
     } // 判断校验值是否一致，若不一致则说明数据发生错误
 
@@ -647,7 +721,12 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
     // 修复野指针及标志型数据，并保存是否成功的结果，后续作为返回值
     bool aResult = DefMapReadFromCache(aBufferPtr, theDefMap, theDefinition);
     size_t aReadMemSize = (uintptr_t)aBufferPtr - (uintptr_t)aUncompressedBuffer;
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+    if (!aScratchOwnsUncompressedBuffer)
+        delete[] (char *)aUncompressedBuffer;
+#else
     delete[] (char *)aUncompressedBuffer;
+#endif
     if (aResult && aReadMemSize != aUncompressedSize) {
         TodTrace(__S("Compiled file wrong size: %s\n"), theCompiledFilePath.c_str());
         return false;
@@ -706,13 +785,21 @@ bool DefinitionIsCompiled(const SexyString& theXMLFilePath)
     if (stat(theXMLFilePath.c_str(), &attr) != 0)
 #endif
     {
-#ifdef PS2_PLATFORM
-        // On PS2 the source XML normally ships inside the pak, so stat() on the
-        // loose filesystem fails. The pak is immutable between runs, so a
-        // compiled file already present on disk is valid — reuse it instead of
-        // recompiling every boot (each reanim compile is several seconds of PNG
-        // decoding on the EE). Only fall through to "can't compile" if the
-        // source isn't in the pak either.
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+        // On console the source XML normally ships inside the pak, so stat() on
+        // the loose filesystem fails and there is no mtime to compare against.
+        // The pak is immutable between runs, so a compiled file already present
+        // on disk is valid — reuse it instead of recompiling every boot (each
+        // reanim compile is tens of seconds, because DefinitionLoadImage
+        // decodes every image the reanim references). Only fall through to
+        // "can't compile" if the source isn't in the pak either.
+        //
+        // This is safe even when the loose file is stale or was built on
+        // another machine: the schema CRC in DefinitionReadCompiledFile rejects
+        // it, the caller falls back to compiling, and the bad file is
+        // overwritten. What it does NOT catch is an asset changing underneath
+        // an otherwise-valid compiled file — delete compiled/ when you edit
+        // reanims or images.
         if (IsFileInPakFile(theXMLFilePath))
             return true;
 #endif

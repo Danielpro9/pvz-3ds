@@ -144,6 +144,8 @@ public: // @Patoke todo: revert to protected
 
 	bool					LoadAlphaGridImage(ImageRes *theRes, GLImage *theImage);
 	bool					LoadAlphaImage(ImageRes *theRes, GLImage *theImage);
+	static bool				ComposeAlphaGridInto(MemoryImage *theImage, ImageLib::Image *theAlphaImage, int theNumRows, int theNumCols, const char *theNameForLog);
+	static bool				ComposeAlphaInto(MemoryImage *theImage, ImageLib::Image *theAlphaImage, const char *theNameForLog);
 	virtual bool			DoLoadImage(ImageRes *theRes);
 	virtual bool			DoLoadFont(FontRes* theRes);
 	virtual bool			DoLoadSound(SoundRes* theRes);
@@ -175,6 +177,12 @@ public:
 	bool					ReplaceImage(const std::string &theId, Image *theImage);
 	bool					ReplaceSound(const std::string &theId, int theSound);
 	bool					ReplaceFont(const std::string &theId, _Font *theFont);
+
+	// Re-applies the stored alpha-companion recipe (mLazyAlphaImagePath /
+	// mLazyAlphaGridPath) after a lazy re-decode. Called from
+	// SexyAppBase::LoadLazyImageBits on SEXY_LAZY_IMAGES builds; static
+	// because the recipe lives on the image itself.
+	static bool				ReapplyLazyAlpha(MemoryImage *theImage);
 
 	void					DeleteImage(const std::string &theName);
 	SharedImageRef			LoadImage(const std::string &theName);

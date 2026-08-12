@@ -122,9 +122,10 @@ ChallengeScreen::ChallengeScreen(LawnApp* theApp, ChallengePage thePage)
 			aPageButton->mLabel = TodStringTranslate(__S("Limbo Page"));
 		else
 			aPageButton->mLabel = TodReplaceNumberString(__S("[PAGE_X]"), __S("{PAGE}"), aPageIdx);
-		aPageButton->mButtonImage = Sexy::IMAGE_BLANK;
-		aPageButton->mOverImage = Sexy::IMAGE_BLANK;
-		aPageButton->mDownImage = Sexy::IMAGE_BLANK;
+		aPageButton->mButtonImage = nullptr;
+		aPageButton->mOverImage = nullptr;
+		aPageButton->mDownImage = nullptr;
+		aPageButton->mFrameNoDraw = true;
 		aPageButton->SetFont(Sexy::FONT_BRIANNETOD12);
 		aPageButton->mColors[ButtonWidget::COLOR_LABEL] = Color(255, 240, 0);
 		aPageButton->mColors[ButtonWidget::COLOR_LABEL_HILITE] = Color(220, 220, 0);
@@ -342,7 +343,10 @@ int ChallengeScreen::MoreTrophiesNeeded(int theChallengeIndex)
 //0x42E6E0
 bool ChallengeScreen::ShowPageButtons()
 {
-	return mApp->mTodCheatKeys && mPageIndex != CHALLENGE_PAGE_SURVIVAL && mPageIndex != CHALLENGE_PAGE_PUZZLE;
+	// Limbo is a regular selectable page in this port. Its challenges already
+	// have no trophy requirement; keep the Challenge/Limbo tabs visible without
+	// requiring the developer cheat-key flag.
+	return mPageIndex == CHALLENGE_PAGE_CHALLENGE || mPageIndex == CHALLENGE_PAGE_LIMBO;
 }
 
 //0x42E710

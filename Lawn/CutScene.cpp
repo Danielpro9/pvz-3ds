@@ -351,9 +351,25 @@ void CutScene::PreloadSeedBankResources()
 		if (aPacket.mPacketType == SeedType::SEED_NONE)
 			continue;
 
-		if (Challenge::IsZombieSeedType(aPacket.mPacketType))
+		// Everything past NUM_SEED_TYPES is a pseudo-seed with no gPlantDefs entry
+		// (Beghouled/Slot Machine buttons, Zombiquarium purchases, iZombie
+		// zombies), so it must never reach PreloadPlantResources: its
+		// GetPlantDefinition() would index past the end of the array.
+		if (aPacket.mPacketType >= SeedType::NUM_SEED_TYPES)
 		{
-			Zombie::PreloadZombieResources(Challenge::IZombieSeedTypeToZombieType(aPacket.mPacketType));
+			// Only the iZombie packets map to a zombie. IsZombieSeedType() also
+			// claims the two Zombiquarium ones, but IZombieSeedTypeToZombieType()
+			// has no case for either and asserts on them — the snorkel packet buys
+			// a ZOMBIE_SNORKEL and the trophy buys no zombie at all.
+			if (aPacket.mPacketType == SeedType::SEED_ZOMBIQUARIUM_SNORKLE)
+			{
+				Zombie::PreloadZombieResources(ZombieType::ZOMBIE_SNORKEL);
+			}
+			else if (aPacket.mPacketType != SeedType::SEED_ZOMBIQUARIUM_TROPHY &&
+				Challenge::IsZombieSeedType(aPacket.mPacketType))
+			{
+				Zombie::PreloadZombieResources(Challenge::IZombieSeedTypeToZombieType(aPacket.mPacketType));
+			}
 			continue;
 		}
 
@@ -1111,7 +1127,7 @@ void CutScene::CancelIntro()
 
 		if (mApp->IsFinalBossLevel())
 		{
-			mApp->mMusic->StartGameMusic();
+			mApp->mMusic->StartGameMusic(mBoard);
 		}
 
 		if (mBoard->mFogBlownCountDown > 0)
@@ -1418,7 +1434,7 @@ void CutScene::AnimateBoard()
 	// ====================================================================================================
 	if (mApp->IsFinalBossLevel() && mCutsceneTime == aTimeSeedBankOnStart)
 	{
-		mApp->mMusic->StartGameMusic();
+		mApp->mMusic->StartGameMusic(mBoard);
 	}
 
 	// ====================================================================================================

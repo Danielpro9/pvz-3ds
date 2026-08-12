@@ -28,6 +28,9 @@ struct Ps2PadSnapshot {
 	float rightX;
 	float rightY;
 	unsigned short held;
+	// Edge bits accumulate across polls until ps2PadConsumeEdges drains them:
+	// the pad can be polled more often than the game updates, and a
+	// press/release edge must not be lost in between.
 	unsigned short pressed;
 	unsigned short released;
 };
@@ -39,6 +42,19 @@ const Ps2PadSnapshot& ps2PadGetSnapshot(int port = 0);
 void ps2PadUpdateSnapshot(int port, bool connected, float leftX, float leftY, float rightX, float rightY,
 	unsigned short held, unsigned short pressed, unsigned short released);
 void ps2PadDisconnect(int port = 0);
+void ps2PadConsumeEdges(int port = 0);
+
+// Board mode: true while gameplay input is live (board on screen, unpaused,
+// no dialogs). Set each game update by Lawn/Ps2BoardControls.cpp. While on,
+// Input.cpp hands the D-Pad, Triangle, L1/R1 over to the board controls and
+// remaps Start to Escape (pause menu).
+bool ps2GetPadBoardMode();
+void ps2SetPadBoardMode(bool theActive);
+
+// Defined in Input.cpp: warps the software cursor to a widget-space (800x600)
+// position — the inverse of WidgetManager::RemapMouse — and sends the
+// matching MouseMove. Used by the board controls for cell snapping.
+void Ps2WarpCursorToGamePos(int theGameX, int theGameY);
 
 // Which pad drives the simulated menu cursor (splitscreen: pad 2 while a
 // player-2-owned screen is open). Default 0.

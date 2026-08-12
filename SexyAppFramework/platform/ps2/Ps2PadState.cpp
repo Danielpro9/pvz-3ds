@@ -26,13 +26,35 @@ void ps2PadUpdateSnapshot(int port, bool connected, float leftX, float leftY, fl
 	s.rightX = rightX;
 	s.rightY = rightY;
 	s.held = held;
-	s.pressed = pressed;
-	s.released = released;
+	s.pressed |= pressed;
+	s.released |= released;
+}
+
+void ps2PadConsumeEdges(int port)
+{
+	if (port < 0 || port >= PS2_MAX_PADS)
+		return;
+	s_ps2PadSnapshot[port].pressed = 0;
+	s_ps2PadSnapshot[port].released = 0;
 }
 
 void ps2PadDisconnect(int port)
 {
 	ps2PadUpdateSnapshot(port, false, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0);
+	// A disconnect must not leave phantom edges behind for a later consumer.
+	ps2PadConsumeEdges(port);
+}
+
+static bool s_boardMode = false;
+
+bool ps2GetPadBoardMode()
+{
+	return s_boardMode;
+}
+
+void ps2SetPadBoardMode(bool theActive)
+{
+	s_boardMode = theActive;
 }
 
 static int s_menuPad = 0;

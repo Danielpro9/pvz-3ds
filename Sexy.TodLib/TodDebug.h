@@ -27,6 +27,10 @@ void				TodAssertFailed(const char* theCondition, const char* theFile, int theLi
 #ifdef PS2_PLATFORM
 extern "C" void		TodInitDebugLogForAppData(const char* theAppDataFolder);
 extern "C" void		TodAppendToDebugLog(const char* theMsg);
+// Ignores SEXY_LOG_LEVEL (it routes through SexyLogForce): fatal-error path
+// only, so the reason a run died is on disk even in builds with per-line
+// logging off.
+extern "C" void		TodForceAppendToDebugLog(const char* theMsg);
 #endif
 
 /*inline*/ void*	TodMalloc(int theSize);

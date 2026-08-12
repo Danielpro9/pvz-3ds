@@ -3,6 +3,7 @@
 #include "Reanimator.h"
 #include "ReanimAtlas.h"
 #include "misc/PerfTimer.h"
+#include "misc/GraphicsBlockArena.h"
 #include "graphics/MemoryImage.h"
 #ifdef PS2_PLATFORM
 #include <new>
@@ -28,11 +29,25 @@ void ReanimAtlas::ReanimAtlasDispose()
 
 ReanimAtlasImage* ReanimAtlas::GetEncodedReanimAtlas(Image* theImage)
 {
-	if (theImage == nullptr || (intptr_t)theImage > 1000)
+	if (theImage == nullptr)
 		return nullptr;
 
-	intptr_t aAtlasIndex = (intptr_t)theImage - 1;
-	TOD_ASSERT(aAtlasIndex >= 0 && aAtlasIndex < mImageCount);
+	// Wii keeps the real Image* in reanimation transforms.  Apart from being
+	// easier to validate, this avoids stale small indices when definitions and
+	// atlases are discarded and rebuilt independently on LOW_MEMORY targets.
+	if ((uintptr_t)theImage > 1000)
+	{
+		int aAtlasIndex = FindImage(theImage);
+		return aAtlasIndex >= 0 ? &mImageArray[aAtlasIndex] : nullptr;
+	}
+
+	uintptr_t aAtlasIndex = (uintptr_t)theImage - 1;
+	// A transform can be copied from another reanimation after that source
+	// definition has encoded its Image* as an atlas-local small integer.  Such
+	// an index has no meaning in this atlas.  Let the draw call omit that image
+	// instead of asserting and then dereferencing the fake pointer.
+	if (aAtlasIndex >= (uintptr_t)mImageCount)
+		return nullptr;
 	return &mImageArray[aAtlasIndex];
 }
 
@@ -59,6 +74,10 @@ MemoryImage* ReanimAtlasMakeBlankMemoryImage(int theWidth, int theHeight)
 		aImage->mBits = new (std::nothrow) uint32_t[aBitsCount + 1];
 	}
 	TOD_ASSERT(aImage->mBits != NULL);
+#elif defined(WII_PLATFORM)
+	aImage->mBits = static_cast<uint32_t*>(ConsoleGraphicsAlloc((aBitsCount + 1) * sizeof(uint32_t)));
+	if (aImage->mBits == NULL)
+		aImage->mBits = new uint32_t[aBitsCount + 1];
 #else
 	aImage->mBits = new uint32_t[aBitsCount + 1];
 #endif
@@ -240,8 +259,24 @@ void ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
 	PerfTimer aTimer;
 	aTimer.Start();
 
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 	printf("[ATLAS] create begin: %d tracks\n", theReanimDef->mTracks.count);
+	// One atlas surface is one contiguous heap allocation, built at whatever
+	// moment a reanimation of this type is first needed — often mid-
+	// gameplay, with the heap already near its pressure ceiling and
+	// fragmented by countless small lazy-image frees (see
+	// ReanimAtlasMakeBlankMemoryImage). Cap how much source pixel area goes
+	// in: the packer rounds each dimension up to a power of 2 and adds a
+	// 1px border per image, so the final texture can run well past the raw
+	// sum, hence the wide margin (budget targets a final surface around
+	// 512x512/1MB instead of growing unbounded up to PickAtlasWidth's own
+	// 2048 cap). Images left out keep their real Image* below (FindImage
+	// returns -1 for them) and draw un-atlased — already-handled by every
+	// draw/lookup site (GetEncodedReanimAtlas treats any value > 1000 as a
+	// real pointer, not an atlas index), just without atlas batching.
+	const int kMaxAtlasSourcePixels = 128 * 1024;
+	int aAtlasPixelBudget = kMaxAtlasSourcePixels;
+	int aSkippedCount = 0;
 #endif
 	for (int aTrackIndex = 0; aTrackIndex < theReanimDef->mTracks.count; aTrackIndex++)
 	{
@@ -251,9 +286,24 @@ void ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
 			Image* aImage = aTrack->mTransforms.mTransforms[aKeyIndex].mImage;
 			// 如果存在贴图，且贴图的宽、高均不大于 254 像素，且相同的贴图未加入至图集图片数组中
 			if (aImage != nullptr && aImage->mWidth <= 254 && aImage->mHeight <= 254 && FindImage(aImage) < 0)
+			{
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+				int aImagePixels = aImage->mWidth * aImage->mHeight;
+				if (aImagePixels > aAtlasPixelBudget)
+				{
+					aSkippedCount++;
+					continue;
+				}
+				aAtlasPixelBudget -= aImagePixels;
+#endif
 				AddImage(aImage);  // 先将其加入数组中，后续再确定其位于图集中的位置
+			}
 		}
 	}
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	if (aSkippedCount > 0)
+		printf("[ATLAS] %d images left un-atlased (pixel budget)\n", aSkippedCount);
+#endif
 
 	int aAtlasWidth, aAtlasHeight;
 #ifdef PS2_PLATFORM
@@ -275,8 +325,21 @@ void ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
 			if (aImage != nullptr && aImage->mWidth <= 254 && aImage->mHeight <= 254)
 			{
 				intptr_t aImageIndex = FindImage(aImage);
+#ifdef WII_PLATFORM
+				// Keep the real pointer. GetEncodedReanimAtlas resolves it through
+				// this atlas at draw time, so the definition never owns a fragile
+				// atlas-local integer disguised as an Image*. A negative index is
+				// valid when the console pixel budget leaves the image un-atlased;
+				// the draw path then uses the original image directly.
+#elif defined(PS2_PLATFORM)
+				// -1 means the pixel budget above left this one out; keep its
+				// real Image* so it draws un-atlased instead of asserting.
+				if (aImageIndex >= 0)
+					aImage = (Image*)(aImageIndex + 1);  // ★ 将图片在数组中的序号作为 Image* 修改动画定义
+#else
 				TOD_ASSERT(aImageIndex >= 0);
 				aImage = (Image*)(aImageIndex + 1);  // ★ 将图片在数组中的序号作为 Image* 修改动画定义
+#endif
 			}
 		}
 	}

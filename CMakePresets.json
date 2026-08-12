@@ -2,6 +2,22 @@
   "version": 3,
   "configurePresets": [
     {
+      "name": "wii-release",
+      "displayName": "Wii Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/wii-release",
+      "toolchainFile": "${sourceDir}/cmake/wii_toolchain.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_MAKE_PROGRAM": "C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
+      },
+      "environment": {
+        "DEVKITPRO": "C:/devkitPro",
+        "DEVKITPPC": "C:/devkitPro/devkitPPC",
+        "PATH": "C:/devkitPro/devkitPPC/bin;C:/devkitPro/tools/bin;$penv{PATH}"
+      }
+    },
+    {
       "name": "ps2-release",
       "displayName": "PS2 Release",
       "generator": "Unix Makefiles",
@@ -18,6 +34,11 @@
     }
   ],
   "buildPresets": [
+    {
+      "name": "wii-release",
+      "configurePreset": "wii-release",
+      "configuration": "Release"
+    },
     {
       "name": "ps2-release",
       "configurePreset": "ps2-release",

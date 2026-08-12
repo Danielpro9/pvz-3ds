@@ -17,7 +17,10 @@
 
 static const char* FILE_COMPILE_TIME_STRING = "Feb 16 200923:03:38";
 static const unsigned int SAVE_FILE_MAGIC_NUMBER = 0xFEEDDEAD;
-static const unsigned int SAVE_FILE_VERSION = 2U;
+// v3: PS2 pool caps shrank (zombies/plants/projectiles/coins/particles) and
+// sizeof(Attachment) changed (MAX_EFFECTS_PER_ATTACHMENT 16->8 on PS2), both
+// of which change this file's raw-block layout — reject older saves.
+static const unsigned int SAVE_FILE_VERSION = 3U;
 static unsigned int SAVE_FILE_DATE = crc32(0, (Bytef*)FILE_COMPILE_TIME_STRING, strlen(FILE_COMPILE_TIME_STRING));  //[0x6AA7EC]
 
 //0x4813D0
@@ -357,6 +360,17 @@ template <typename T> inline static void SyncDataArray(SaveGameContext& theConte
 	theContext.SyncUint(theDataArray.mFreeListHead);
 	theContext.SyncUint(theDataArray.mMaxUsedCount);
 	theContext.SyncUint(theDataArray.mSize);
+	// A save written against a larger pool would overflow mBlock: SyncBytes
+	// validates the stream's length prefix, not the destination capacity.
+	// Leave the array empty and fail the load instead.
+	if (theContext.mReading && theDataArray.mMaxUsedCount > theDataArray.mMaxSize)
+	{
+		theDataArray.mFreeListHead = 0;
+		theDataArray.mMaxUsedCount = 0;
+		theDataArray.mSize = 0;
+		theContext.mFailed = true;
+		return;
+	}
 	theContext.SyncBytes(theDataArray.mBlock, theDataArray.mMaxUsedCount * sizeof(*theDataArray.mBlock));
 }
 
@@ -535,6 +549,20 @@ bool LawnSaveGame(Board* theBoard, const std::string& theFilePath)
 	aContext.mFailed = false;
 	aContext.mReading = false;
 
+	// The board serialises to a few hundred KB one byte at a time, so an
+	// unreserved buffer climbs there through ~19 reallocations, each needing a
+	// contiguous block larger than the sum of the ones it just freed. That
+	// ladder is what fragments the heap, and on a heap that has already taken
+	// all of MEM2 it is also where the allocation dies.
+	//
+	// Sizing from the largest previous save turns the whole thing into a single
+	// alloc/free of a constant size, which is fragmentation-neutral: each save
+	// reuses the identical hole the last one left. The first save of a session
+	// still ladders, on a heap young enough for it not to matter.
+	static int sMaxSaveBytes = 0;
+	if (sMaxSaveBytes > 0)
+		aContext.mBuffer.Reserve(sMaxSaveBytes);
+
 	SaveFileHeader aHeader;
 	aHeader.mMagicNumber = SAVE_FILE_MAGIC_NUMBER;
 	aHeader.mBuildVersion = SAVE_FILE_VERSION;
@@ -542,5 +570,10 @@ bool LawnSaveGame(Board* theBoard, const std::string& theFilePath)
 
 	aContext.SyncBytes(&aHeader, sizeof(aHeader));
 	SyncBoard(aContext, theBoard);
+
+	const int aSize = aContext.mBuffer.GetDataLen();
+	if (aSize > sMaxSaveBytes)
+		sMaxSaveBytes = aSize;
+
 	return gSexyAppBase->WriteBufferToFile(theFilePath, &aContext.mBuffer);
 }

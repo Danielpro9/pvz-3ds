@@ -8,7 +8,13 @@
 
 #define BEGHOULED_MAX_GRIDSIZEX 8
 #define BEGHOULED_MAX_GRIDSIZEY 5
-#define ART_CHALLEGE_SIZE_X 8
+// Width of the gArtChallenge* tables in Challenge.cpp, which are declared
+// [MAX_GRID_SIZE_Y][MAX_GRID_SIZE_X] -- 9 columns, matching the lawn. This said
+// 8 while every caller looped to MAX_GRID_SIZE_X and PlantAdded/CanPlantAt pass
+// a real plant column, so the last column tripped the bounds assert in
+// GetArtChallengeSeed even though index 8 is perfectly in range (and always
+// SEED_NONE). Harmless on desktop, where the assert compiles out; fatal here.
+#define ART_CHALLEGE_SIZE_X 9
 #define MAX_PICK_GRID_SIZE 50
 
 constexpr const int BEGHOULED_WINNING_SCORE = 75;

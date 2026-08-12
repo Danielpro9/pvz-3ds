@@ -261,6 +261,10 @@ public:
 	virtual void					KeyChar(SexyChar theChar);
 	virtual void					KeyUp(KeyCode) {}
 	virtual void					KeyDown(KeyCode theKey);
+	bool                            HasKeyboardSeedSelection() const;
+	bool                            MoveKeyboardSeedSelection(int theStep);
+	void                            ActivateKeyboardSeedSelection();
+	void                            ClearKeyboardSeedSelection();
 	virtual void					Update();
 	void							UpdateLayers();
 	virtual void					Draw(Graphics* g);

@@ -31,6 +31,32 @@ namespace {
 #define PS2_PAUSE_MIXER_FOR_IO() ((void)0)
 #endif
 
+#ifdef LOW_MEMORY
+#include "graphics/MemoryImage.h"
+// Shed the backgrounds' decoded bits (~840KB each) at a phase cut, but KEEP
+// their textures. The incoming phase's transition wipe draws the outgoing
+// phase's backgrounds clipped for its first ~125 frames, so evicting textures
+// here destroyed exactly what the very next Draw needed: every cut became a
+// mid-movie storm of full 1400x600 re-decodes + re-uploads, and that fio burst
+// is where real hardware wedged (log ends right after a background's "[LAZY]
+// committed"). Bits-only is nearly free heap-wise anyway — CreateTextures
+// already drops each background's bits once its texture exists, so all that
+// stays resident per background is the GL shim's ~200KB texture copy.
+static void CreditsEvictBackgrounds()
+{
+	Sexy::Image* aBackgrounds[] = { IMAGE_BACKGROUND1, IMAGE_BACKGROUND2,
+		IMAGE_BACKGROUND3, IMAGE_BACKGROUND4, IMAGE_BACKGROUND5, IMAGE_BACKGROUND6BOSS };
+	for (Sexy::Image* anImage : aBackgrounds)
+	{
+		Sexy::MemoryImage* aMemoryImage = dynamic_cast<Sexy::MemoryImage*>(anImage);
+		if (aMemoryImage != nullptr)
+			Sexy::gSexyAppBase->PurgeLazyImage(aMemoryImage, true);
+	}
+}
+#else
+static void CreditsEvictBackgrounds() { }
+#endif
+
 static CreditsTiming gCreditsTiming[] = {  //0x6A1AD8
     {  128.5f,      CreditWordType::WORD_AW ,         0,     CreditBrainType::BRAIN_OFF       },
     {  133.0f,      CreditWordType::WORD_OH ,         0,     CreditBrainType::BRAIN_OFF       },
@@ -406,7 +432,11 @@ void CreditScreen::PreLoadCredits()
 	// ~26 MB heap ("freezes completely while loading"). The board is already
 	// torn down (EffectSystemFreeAll ran in the ctor), so free everything
 	// reclaimable first to give the load maximum headroom; it reloads on demand.
-	mApp->PurgeUnusedAssets();
+	// Forced: PurgeUnusedAssets's default heuristic skips the actual purge
+	// below 18MB used, which is exactly the range this can walk in at from a
+	// lighter previous screen — leaving whatever that screen loaded resident
+	// right as this stacks its own worst-case load on top of it.
+	mApp->PurgeUnusedAssets(true);
 	if (mApp->mSoundManager != nullptr)
 		mApp->mSoundManager->PurgeSounds();
 	mApp->PurgeLazyImageBits(true);
@@ -802,11 +832,23 @@ void CreditScreen::Draw(Graphics* g)
     mDrawCount++;
     if (mDrawCount == 2)
     {
+#ifdef LOW_MEMORY
+        // Warm only phase 1's background. Committing all five 1400x600
+        // backgrounds pins ~4MB of texture copies on a heap already ~23MB
+        // deep after PreLoadCredits, and the decode of the first one walks
+        // past the ~26MB ceiling — the "credits freeze the console" bug.
+        // The others fault in when their phase first draws them; phase cuts
+        // shed only their decoded bits (textures stay for the transition
+        // wipes — see CreditsEvictBackgrounds).
+        g->DrawImage(IMAGE_BACKGROUND1, 0, 0);
+        mApp->PurgeLazyImageBits(true);
+#else
         g->DrawImage(IMAGE_BACKGROUND1, 0, 0);
         g->DrawImage(IMAGE_BACKGROUND2, 0, 0);
         g->DrawImage(IMAGE_BACKGROUND3, 0, 0);
         g->DrawImage(IMAGE_BACKGROUND4, 0, 0);
         g->DrawImage(IMAGE_BACKGROUND5, 0, 0);
+#endif
         DrawReanimToPreload(g, ReanimationType::REANIM_CREDITS_BOSSDANCE);
         DrawReanimToPreload(g, ReanimationType::REANIM_CREDITS_CRAZYDAVE);
         DrawReanimToPreload(g, ReanimationType::REANIM_ZOMBIE_CREDITS_DANCE);
@@ -1131,11 +1173,19 @@ void CreditScreen::Update()
 
         int aUnsyncedDuration = aDurationSinceStart - aDurationReanimation;
         int aUnsyncedFrames = (aUnsyncedDuration + 5) / 10;
+#ifdef PS2_PLATFORM
+        // Each trace is a USB log round-trip (plus a mixer park); the 2-3
+        // frame chatter printed every update was slowing the very movie it
+        // measures. Keep only the big post-refault resyncs.
+        const int aTraceFloor = 30;
+#else
+        const int aTraceFloor = 2;
+#endif
         if (aUnsyncedFrames < 0)
         {
             TodTrace("Movie playing too fast %d frames", 1 - aUnsyncedFrames);
         }
-        else if (aUnsyncedFrames > 2)
+        else if (aUnsyncedFrames > aTraceFloor)
         {
             TodTrace("Movie playing too slow %d frames", aUnsyncedFrames - 1);
         }
@@ -1145,6 +1195,17 @@ void CreditScreen::Update()
             JumpToFrame((CreditsPhase)((int)mCreditsPhase + 1), 0.0f);
             aUnsyncedFrames = 0;
         }
+#ifdef PS2_PLATFORM
+        // Cap the resync replay. After a lazy-load stall the backlog can hit
+        // 100+ frames, and replaying them all inside one Update is its own
+        // stall (each UpdateMovie ticks the whole reanim + effect system and
+        // its timed events fire a particle burst), so the backlog GROWS —
+        // observed spiralling 70→125 frames right before the credits crash.
+        // Spread the catch-up across updates instead; the >10s JumpToFrame
+        // above remains the big-skip fallback.
+        if (aUnsyncedFrames > 15)
+            aUnsyncedFrames = 15;
+#endif
         while (aUnsyncedFrames > 0)
         {
             UpdateMovie();
@@ -1171,16 +1232,19 @@ void CreditScreen::UpdateMovie()
 
     if (mCreditsPhase == CreditsPhase::CREDITS_MAIN1 && aCreditsReanim->mLoopCount > 0)
     {
+        CreditsEvictBackgrounds();
         aCreditsReanim = PlayReanim(2);
         mCreditsPhase = CreditsPhase::CREDITS_MAIN2;
     }
     else if (mCreditsPhase == CreditsPhase::CREDITS_MAIN2 && aCreditsReanim->mLoopCount > 0)
     {
+        CreditsEvictBackgrounds();
         aCreditsReanim = PlayReanim(3);
         mCreditsPhase = CreditsPhase::CREDITS_MAIN3;
     }
     else if (mCreditsPhase == CreditsPhase::CREDITS_MAIN3 && aCreditsReanim->mLoopCount > 0)
     {
+        CreditsEvictBackgrounds();
         mCreditsPhase = CreditsPhase::CREDITS_END;
     }
     else if (mCreditsPhase == CreditsPhase::CREDITS_END)
@@ -1445,7 +1509,8 @@ void CreditScreen::UpdateMovie()
             aSunFlowerReanim->SetImageOverride("anim_idle", IMAGE_REANIM_SUNFLOWER_HEAD_WINK);
             Reanimation* aStageReanim = FindSubReanim(aCreditsReanim, ReanimationType::REANIM_CREDITS_STAGE);
             aSunFlowerReanim->mAnimTime -= aSunFlowerReanim->mAnimRate * SECONDS_PER_UPDATE / aSunFlowerReanim->mFrameCount;
-            aStageReanim->mAnimTime -= aStageReanim->mAnimRate * SECONDS_PER_UPDATE / aStageReanim->mFrameCount;
+            if (aStageReanim != nullptr)
+                aStageReanim->mAnimTime -= aStageReanim->mAnimRate * SECONDS_PER_UPDATE / aStageReanim->mFrameCount;
         }
         else
         {
@@ -1500,6 +1565,9 @@ void CreditScreen::JumpToFrame(CreditsPhase thePhase, float theFrame)
     mReplayButton->SetVisible(false);
     mCreditsPhaseCounter = 0;
     mApp->mEffectSystem->EffectSystemFreeAll();
+
+    if (thePhase != mCreditsPhase)
+        CreditsEvictBackgrounds();
 
     Reanimation* aReanim;
     if (thePhase == CreditsPhase::CREDITS_END)

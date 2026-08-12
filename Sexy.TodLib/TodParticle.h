@@ -12,7 +12,14 @@ namespace Sexy
 //using namespace std;
 using namespace Sexy;
 
+// IsOverLoaded threshold: ~88% of the pool caps in TodParticleHolder::
+// InitializeHolder, which are halved on PS2 — keep it proportional or
+// PARTICLE_DIE_IF_OVERLOADED effects would never self-limit there.
+#ifdef PS2_PLATFORM
+#define MAX_PARTICLES_SIZE 450
+#else
 #define MAX_PARTICLES_SIZE 900
+#endif
 #define MAX_PARTICLE_FIELDS 4
 
 // ######################################################################################################################################################
