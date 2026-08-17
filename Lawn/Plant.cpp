@@ -1521,6 +1521,10 @@ void Plant::UpdateSquash()
             }
 
             mState = PlantState::STATE_SQUASH_RISING;
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+            if (mBoard)
+                mBoard->InvalidatePlantGridCache();
+#endif
             mStateCountdown = 50;
             mRenderOrder = Board::MakeRenderOrder(RenderLayer::RENDER_LAYER_PARTICLE, mRow, 0);
         }
@@ -2367,6 +2371,10 @@ void Plant::Squish()
 
     mRenderOrder = Board::MakeRenderOrder(RenderLayer::RENDER_LAYER_GRAVE_STONE, mRow, 8);
     mSquished = true;
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+    if (mBoard)
+        mBoard->InvalidatePlantGridCache();
+#endif
     mDisappearCountdown = 500;
     mApp->PlayFoley(FoleyType::FOLEY_SQUISH);
     RemoveEffects();
@@ -5012,6 +5020,10 @@ void Plant::Die()
     }
 
     mDead = true;
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+    if (mBoard)
+        mBoard->InvalidatePlantGridCache();
+#endif
     RemoveEffects();
 
     if (!Plant::IsFlying(mSeedType) && IsOnBoard())

@@ -34,29 +34,16 @@
 // mixer park it has always had), SexyLog.cpp for everyone else. Adding a target
 // means writing that function and nothing else.
 
-// Verbosity, replacing WII_LOG_LEVEL and PS2_FILE_LOG.
+// Logging verbosity is supplied by the build as SEXY_LOG_LEVEL.
 //
-//   0  Off. Per-line logging is skipped entirely. SexyLogForce still writes,
-//      so the reason a run died reaches the disk even here.
-//   1  Normal. Boot, load phases, state transitions, failures.
-//   2  Verbose. Periodic heap/frame reports, per-texture loads, GL warnings.
-//      Not free -- see the cost note on the Wii sink.
+//   0  Off. Per-line logging is skipped entirely. SexyLogForce still writes.
+//   1  Normal. Boot, load phases, state transitions, and failures.
+//   2  Verbose. Periodic heap/frame reports, per-texture loads, and GL warnings.
 //
-// The old names are still honoured so a build script passing -DWII_LOG_LEVEL=0
-// or -DPS2_FILE_LOG=1 keeps working and means what it used to. The defaults are
-// per-platform on purpose and preserve what each build did before: PS2 off (a
-// line there is an fopen/fwrite/fclose round-trip on the save device, thousands
-// per load), Wii on.
+// Keep this as the only logging definition across every platform so a build
+// cannot accidentally compile different translation units at different levels.
 #ifndef SEXY_LOG_LEVEL
-	#if defined(WII_LOG_LEVEL)
-		#define SEXY_LOG_LEVEL WII_LOG_LEVEL
-	#elif defined(PS2_FILE_LOG)
-		#define SEXY_LOG_LEVEL PS2_FILE_LOG
-	#elif defined(PS2_PLATFORM)
-		#define SEXY_LOG_LEVEL 0
-	#else
-		#define SEXY_LOG_LEVEL 1
-	#endif
+	#error "SEXY_LOG_LEVEL must be defined by the build system (0, 1, or 2)"
 #endif
 
 #if defined(__GNUC__)

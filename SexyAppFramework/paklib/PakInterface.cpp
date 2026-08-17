@@ -5,8 +5,8 @@
 // The PopCap pak format stores its multibyte directory fields little-endian,
 // so every one of them goes through SexyLE* on the way in.
 #include "misc/SexyEndian.h"
+#include "misc/PlatformIoLock.h"
 #ifdef PS2_PLATFORM
-#include "Ps2IoLock.h"
 #include "Ps2AssetIndex.h"
 #include "platform/ps2/Ps2BigArena.h" // big pak records buffer in the reserved arena
 #include "SexyAppBase.h" // purge-rescue for the per-record buffer malloc
@@ -76,23 +76,23 @@ static size_t Ps2ChunkedFRead(void* thePtr, size_t theSizeBytes, FILE* theFP,
 	const size_t kChunk = 128 * 1024;
 	size_t aTotal = 0;
 	if (!theDropLockBetweenChunks)
-		Ps2IoLockAcquire();
+		PlatformIoLockAcquire();
 	while (aTotal < theSizeBytes)
 	{
 		size_t aWant = theSizeBytes - aTotal;
 		if (aWant > kChunk)
 			aWant = kChunk;
 		if (theDropLockBetweenChunks)
-			Ps2IoLockAcquire();
+			PlatformIoLockAcquire();
 		size_t aGot = fread((unsigned char*)thePtr + aTotal, 1, aWant, theFP);
 		if (theDropLockBetweenChunks)
-			Ps2IoLockRelease();
+			PlatformIoLockRelease();
 		aTotal += aGot;
 		if (aGot != aWant)
 			break;
 	}
 	if (!theDropLockBetweenChunks)
-		Ps2IoLockRelease();
+		PlatformIoLockRelease();
 	return aTotal;
 }
 
@@ -106,12 +106,12 @@ static size_t Ps2ChunkedFRead(void* thePtr, size_t theSizeBytes, FILE* theFP,
 static FILE* Ps2GetSharedPakHandle(PakCollection* theCollection, const char* thePath)
 {
 	static std::map<PakCollection*, FILE*> sPakHandles;
-	Ps2IoLockAcquire();
+	PlatformIoLockAcquire();
 	FILE*& aFP = sPakHandles[theCollection];
 	if (aFP == NULL)
 		aFP = fcaseopen(thePath, "rb");
 	FILE* aResult = aFP;
-	Ps2IoLockRelease();
+	PlatformIoLockRelease();
 	return aResult;
 }
 #endif
@@ -476,11 +476,11 @@ PFILE* PakInterface::FOpen(const char* theFileName, const char* anAccess)
 			aPFP->mFP = NULL;
 			aPFP->mBuffer = NULL;
 			int aSize = anItr->second.mSize;
-			Ps2IoLockAcquire(); // printf is a fio RPC too — serialize with pak IO
+			PlatformIoLockAcquire(); // printf is a fio RPC too — serialize with pak IO
 			printf("[PAKREAD] '%s' size=%d start=%d ...\n",
 				anItr->second.mFileName.c_str(), aSize, anItr->second.mStartPos);
 			fflush(stdout); // ensure the record name is visible even if the read hangs
-			Ps2IoLockRelease();
+			PlatformIoLockRelease();
 			// Big records buffer in the reserved arena so a 300KB+ read never
 			// competes with general-heap fragmentation; the free() wrap routes
 			// the pointer back to the arena when p_fclose releases it.
@@ -518,7 +518,7 @@ PFILE* PakInterface::FOpen(const char* theFileName, const char* anAccess)
 					anItr->second.mCollection->mPakPath.c_str());
 				if (f != NULL)
 				{
-					Ps2IoLockAcquire();
+					PlatformIoLockAcquire();
 					fseek(f, anItr->second.mStartPos, SEEK_SET);
 					size_t aRead = Ps2ChunkedFRead(aBuffer, (size_t)aSize, f, false);
 					for (size_t i = 0; i < aRead; i++)
@@ -526,22 +526,22 @@ PFILE* PakInterface::FOpen(const char* theFileName, const char* anAccess)
 					aPFP->mBuffer = aBuffer;
 					printf("[PAKREAD] '%s' done (%u bytes)\n",
 						anItr->second.mFileName.c_str(), (unsigned)aRead);
-					Ps2IoLockRelease();
+					PlatformIoLockRelease();
 				}
 				else
 				{
 					free(aBuffer);
-					Ps2IoLockAcquire();
+					PlatformIoLockAcquire();
 					printf("[PAKREAD] '%s' open FAILED\n", anItr->second.mFileName.c_str());
-					Ps2IoLockRelease();
+					PlatformIoLockRelease();
 				}
 			}
 			else
 			{
-				Ps2IoLockAcquire();
+				PlatformIoLockAcquire();
 				printf("[PAKREAD] '%s' malloc(%d) FAILED\n",
 					anItr->second.mFileName.c_str(), aSize);
-				Ps2IoLockRelease();
+				PlatformIoLockRelease();
 			}
 			// Fallback: if buffering failed, keep a streaming handle open.
 			if (aPFP->mBuffer == NULL)
@@ -622,9 +622,9 @@ int PakInterface::FClose(PFILE* theFile)
 		free(theFile->mBuffer);
 	if (theFile->mFP != NULL)
 	{
-		Ps2IoLockAcquire();
+		PlatformIoLockAcquire();
 		fclose(theFile->mFP);
-		Ps2IoLockRelease();
+		PlatformIoLockRelease();
 	}
 #elif defined(WII_PLATFORM)
 	if (theFile->mBuffer != NULL)
@@ -658,9 +658,9 @@ int PakInterface::FSeek(PFILE* theFile, long theOffset, int theOrigin)
 	else
 	{
 #ifdef PS2_PLATFORM
-		Ps2IoLockAcquire();
+		PlatformIoLockAcquire();
 		int aResult = fseek(theFile->mFP, theOffset, theOrigin);
-		Ps2IoLockRelease();
+		PlatformIoLockRelease();
 		return aResult;
 #else
 		return fseek(theFile->mFP, theOffset, theOrigin);
@@ -676,9 +676,9 @@ int PakInterface::FTell(PFILE* theFile)
 	else
 	{
 #ifdef PS2_PLATFORM
-		Ps2IoLockAcquire();
+		PlatformIoLockAcquire();
 		int aResult = ftell(theFile->mFP);
-		Ps2IoLockRelease();
+		PlatformIoLockRelease();
 		return aResult;
 #else
 		return ftell(theFile->mFP);
@@ -707,9 +707,9 @@ size_t PakInterface::FRead(void* thePtr, int theElemSize, int theCount, PFILE* t
 		// Fallback streaming: seek to the record's position and read + decrypt.
 		FILE* f = theFile->mFP;
 		if (f == NULL) return 0;
-		Ps2IoLockAcquire();
+		PlatformIoLockAcquire();
 		fseek(f, theFile->mRecord->mStartPos + theFile->mPos, SEEK_SET);
-		Ps2IoLockRelease();
+		PlatformIoLockRelease();
 		size_t bytesRead = Ps2ChunkedFRead(thePtr, (size_t)aSizeBytes, f, true);
 		uchar* p = (uchar*)thePtr;
 		for (size_t i = 0; i < bytesRead; i++) p[i] ^= 0xF7;

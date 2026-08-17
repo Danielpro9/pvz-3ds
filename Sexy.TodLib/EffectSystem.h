@@ -26,6 +26,10 @@ public:
     TriVertex                   mVertArray[MAX_TRIANGLES][3];
     int                         mTriangleCount;
     int                         mDrawMode;
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+    float                       mOneOverImageWidth;
+    float                       mOneOverImageHeight;
+#endif
 
     TodTriangleGroup();
     void                        DrawGroup(Graphics* g);

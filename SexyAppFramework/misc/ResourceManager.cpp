@@ -11,11 +11,8 @@
 
 #ifdef PS2_PLATFORM
 #include <pthread.h>
-#include "platform/ps2/Ps2IoLock.h" // GetImageDims header probes read the pak
-#elif defined(WII_PLATFORM)
-static inline void Ps2IoLockAcquire() {}
-static inline void Ps2IoLockRelease() {}
 #endif
+#include "PlatformIoLock.h"
 
 //#define SEXY_PERF_ENABLED
 #include "PerfTimer.h"
@@ -385,6 +382,11 @@ bool ResourceManager::ParseImageResource(XMLElement &theElement)
 	if (anItr != theElement.mAttributes.end())
 		aRes->mCols = sexyatoi(anItr->second.c_str());
 	else
+		aRes->mCols = 1;
+
+	if (aRes->mRows < 1)
+		aRes->mRows = 1;
+	if (aRes->mCols < 1)
 		aRes->mCols = 1;
 
 	anItr = theElement.mAttributes.find(__S("anim"));
@@ -929,9 +931,9 @@ bool ResourceManager::DoLoadImage(ImageRes *theRes)
 			const std::string& anAlphaPath = theRes->mAlphaGridImage.empty() ?
 				theRes->mAlphaImage : theRes->mAlphaGridImage;
 			int anAlphaWidth, anAlphaHeight;
-			Ps2IoLockAcquire();
+			PlatformIoLockAcquire();
 			bool anAlphaDimsOk = ImageLib::GetImageDims(anAlphaPath, anAlphaWidth, anAlphaHeight);
-			Ps2IoLockRelease();
+			PlatformIoLockRelease();
 			if (!anAlphaDimsOk)
 				return Fail(StrFormat("Failed to load image: %s", anAlphaPath.c_str()));
 			if (!theRes->mAlphaGridImage.empty())

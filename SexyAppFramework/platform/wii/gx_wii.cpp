@@ -172,13 +172,13 @@ void wiigl_init(bool widescreen)
 	// OpenGX rate-limits each warning call site and routes it through wiiLog, so
 	// repeated state failures remain visible in the SD log without becoming a
 	// per-primitive firehose.
-	_ogx_log_mask = (WII_LOG_LEVEL >= 2) ? (1u << 0) : 0u;
+	_ogx_log_mask = (SEXY_LOG_LEVEL >= 2) ? (1u << 0) : 0u;
 	ogx_enable_double_buffering(1);
 
 	g_initialised = true;
 
 	wiiLog("[WII][CFG] log=%d ogxWarnings=%d deflicker=%d texture=%s\n",
-	       WII_LOG_LEVEL, _ogx_log_mask != 0 ? 1 : 0, WII_DEFLICKER,
+	       SEXY_LOG_LEVEL, _ogx_log_mask != 0 ? 1 : 0, WII_DEFLICKER,
 	       WII_TEXTURE_RGB5A3 ? "RGB5A3" : "RGBA8");
 
 	// aa is logged because it constrains the pixel format: GX only supports

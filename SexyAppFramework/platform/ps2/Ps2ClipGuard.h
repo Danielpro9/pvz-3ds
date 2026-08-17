@@ -2,10 +2,9 @@
 
 #if defined(PS2_PLATFORM)
 
-#include <libvux.h>
-
-// Guard band and color helpers shared by gles_ps2.cpp and the fast draw paths.
-// They live here because all PS2 render paths already include this file.
+// Guard-band and clipping helpers shared by the PS2 OpenGL backend.
+// Keep this file independent from VU submission so the same clipper can back
+// the scalar/VU0 fallback and a future VU1 batch path.
 #ifndef PS2_GUARD_BAND_PX
 #define PS2_GUARD_BAND_PX 256.0f
 #endif
@@ -43,41 +42,9 @@ static inline int ps2_texcol_scale(int c)
 #define PS2_TEXCOL(v) ps2_texcol_scale((int)(v))
 #endif
 
-#ifndef PS2_TEXCOL_GUI
-#define PS2_TEXCOL_GUI(v) ps2_texcol_scale((int)(v))
-#endif
-
-static inline void ps2_vu0_xform3(const VU_MATRIX* m,
-                                  const VU_VECTOR* in0,
-                                  const VU_VECTOR* in1,
-                                  const VU_VECTOR* in2,
-                                  VU_VECTOR* out0,
-                                  VU_VECTOR* out1,
-                                  VU_VECTOR* out2)
-{
-    Vu0ApplyMatrix((VU_MATRIX*)m, (VU_VECTOR*)in0, out0);
-    Vu0ApplyMatrix((VU_MATRIX*)m, (VU_VECTOR*)in1, out1);
-    Vu0ApplyMatrix((VU_MATRIX*)m, (VU_VECTOR*)in2, out2);
-}
-
-static inline void ps2_vu0_xform4(const VU_MATRIX* m,
-                                  const VU_VECTOR* in0,
-                                  const VU_VECTOR* in1,
-                                  const VU_VECTOR* in2,
-                                  const VU_VECTOR* in3,
-                                  VU_VECTOR* out0,
-                                  VU_VECTOR* out1,
-                                  VU_VECTOR* out2,
-                                  VU_VECTOR* out3)
-{
-    Vu0ApplyMatrix((VU_MATRIX*)m, (VU_VECTOR*)in0, out0);
-    Vu0ApplyMatrix((VU_MATRIX*)m, (VU_VECTOR*)in1, out1);
-    Vu0ApplyMatrix((VU_MATRIX*)m, (VU_VECTOR*)in2, out2);
-    Vu0ApplyMatrix((VU_MATRIX*)m, (VU_VECTOR*)in3, out3);
-}
 
 // Shared near/guard-band clipper for the PS2 GL compatibility path and the
-// fast-draw backends. It clips in clip-space against:
+// generic draw backend. It clips in clip-space against:
 //   w >= near, -gx*w <= x <= gx*w, -gy*w <= y <= gy*w.
 
 static const float PS2_NEAR_CLIP_W = 0.0001f;

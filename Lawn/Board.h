@@ -309,6 +309,10 @@ public:
 	void							UpdateToolTip();
 	Plant*							GetTopPlantAt(int theGridX, int theGridY, PlantPriority thePriority);
 	void							GetPlantsOnLawn(int theGridX, int theGridY, PlantsOnLawn* thePlantOnLawn);
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	void							InvalidatePlantGridCache();
+	void							RebuildPlantGridCache();
+#endif
 	/*inline*/ int					CountSunFlowers();
 	int								GetSeedPacketPositionX(int theIndex);
 	void							AddGraveStones(int theGridX, int theCount, MTRand& theLevelRNG);

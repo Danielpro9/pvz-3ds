@@ -1,6 +1,20 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.10)
 
 project(re-plants-vs-zombies LANGUAGES C CXX ASM)
+
+# One logging switch for every target. Pass -DSEXY_LOG_LEVEL=0/1/2 to CMake.
+# The compiler only sees SEXY_LOG_LEVEL; platform-specific aliases are not used.
+if(NOT DEFINED SEXY_LOG_LEVEL)
+	if(PS2)
+		set(SEXY_LOG_LEVEL 0 CACHE STRING "Logging verbosity (0=off, 1=normal, 2=verbose)")
+	else()
+		set(SEXY_LOG_LEVEL 1 CACHE STRING "Logging verbosity (0=off, 1=normal, 2=verbose)")
+	endif()
+endif()
+set_property(CACHE SEXY_LOG_LEVEL PROPERTY STRINGS 0 1 2)
+if(NOT SEXY_LOG_LEVEL MATCHES "^[012]$")
+	message(FATAL_ERROR "SEXY_LOG_LEVEL must be 0, 1, or 2")
+endif()
 
 file(GLOB SOURCES
 	*.cpp
@@ -19,6 +33,14 @@ file(GLOB SOURCES
 	Lawn/System/*.cpp
 	SexyAppFramework/LawnProject.rc
 )
+
+# Keep the console streaming definition reader explicit so an existing build tree
+# notices the sources even though the main source list uses a plain GLOB.
+list(APPEND SOURCES
+	${CMAKE_CURRENT_SOURCE_DIR}/Sexy.TodLib/DefinitionStreaming.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Sexy.TodLib/DefinitionStreamDecoder.cpp
+)
+list(REMOVE_DUPLICATES SOURCES)
 
 # these files are included and must not be built in the project
 list(REMOVE_ITEM SOURCES
@@ -55,7 +77,8 @@ if(NINTENDO_WII)
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/wii/WiiCursor.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/wii/gx_wii.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/wii/sound/WiiSoundManager.cpp
-		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/wii/WiiOnScreenKeyboard.cpp
+		# The on-screen keyboard is shared with PS2 now and lives in
+		# SexyAppFramework/widget, which the common glob already picks up.
 		${WII_OPENGX_SOURCES}
 	)
 	list(APPEND PLAT_INCLUDES
@@ -74,8 +97,8 @@ elseif(PS2)
 	# has no global coordinate scaling — reanim transforms and hardcoded
 	# 800x600 positions stay full-res, so everything renders scattered at
 	# half size. VRAM/RAM savings come from the texture-level downscale in
-	# gles_ps2.cpp instead (PS2_TEX_SHRINK_SHIFT), which is invisible to
-	# game-side layout.
+	# the PS2 texture backend instead (PS2_GS_TEXTURE_SHRINK_SHIFT), which is
+	# invisible to game-side layout.
 	set(DOWNSCALE_COUNT 1)
 	list(REMOVE_ITEM SOURCES
 		${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
@@ -84,6 +107,7 @@ elseif(PS2)
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/sound/SDLMusicInterface.cpp
 	)
 	include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ps2_embed_irx.cmake)
+
 	set(PS2_IRX_BLOBS ${CMAKE_CURRENT_BINARY_DIR}/ps2_irx_blobs.c)
 	ps2_embed_irx(${PS2_IRX_BLOBS}
 		$ENV{PS2SDK}/iop/irx/usbd.irx
@@ -107,15 +131,20 @@ elseif(PS2)
 	)
 	list(APPEND SOURCES
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/main_pvz_ps2.cpp
-		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/gles_ps2.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/CrashHandler_ps2.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/Ps2TextureConversion.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/Ps2ImageMemory.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/Ps2VramAllocator.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/Ps2PadState.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/Ps2IoLock.c
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/Ps2Trace.c
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/Ps2AssetIndex.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/graphics/Window.cpp
-		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/graphics/GLInterface.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/graphics/Ps2GraphicsInterface.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/graphics/Ps2GsClutCache.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/graphics/Ps2GsCommandBuffer.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/graphics/Ps2GsRenderer.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/graphics/Ps2GsTexture.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/Input.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/Ps2PvzServices.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/ps2/sound/Ps2SoundManager.cpp
@@ -196,7 +225,7 @@ target_include_directories(re-plants-vs-zombies PRIVATE
 if (NOT PS2 AND NOT NINTENDO_WII)
 	target_include_directories(re-plants-vs-zombies PRIVATE ${SDL2_INCLUDE_DIRS})
 endif()
-target_compile_definitions(re-plants-vs-zombies PRIVATE _DEBUG)
+target_compile_definitions(re-plants-vs-zombies PRIVATE _DEBUG SEXY_LOG_LEVEL=${SEXY_LOG_LEVEL})
 if (PS2)
 	target_compile_definitions(re-plants-vs-zombies PRIVATE PS2_PLATFORM)
 	target_compile_options(re-plants-vs-zombies PRIVATE -include SDL.h)
@@ -254,7 +283,11 @@ elseif (PS2)
 	target_link_libraries(re-plants-vs-zombies
 		jpeg png z
 		gskit gskit_toolkit dmakit
-		pad mouse graph dma vux kernel
+		pad mouse graph dma vux
+		# "debug" es palabra reservada de target_link_libraries (debug/optimized/
+		# general): CMake la comía junto con la lib siguiente y en Release se
+		# perdían -ldebug y -lkernel. Van como flags crudos.
+		eedebug "-ldebug" "-lkernel"
 		audsrv patches mc
 		fileXio cdvd
 		m

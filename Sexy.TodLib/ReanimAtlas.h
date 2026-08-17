@@ -34,6 +34,10 @@ public:
     ReanimAtlasImage                mImageArray[MAX_REANIM_IMAGES];     //+0x0
     int                             mImageCount;                        //+0x500
     MemoryImage*                    mMemoryImage;                       //+0x504
+#ifdef WII_PLATFORM
+    unsigned char                   mImageHash[128];
+    bool                            mImageHashValid;
+#endif
 
 public:
     ReanimAtlas();
@@ -42,6 +46,9 @@ public:
     void                            ReanimAtlasDispose();
     /*inline*/ void                 AddImage(Image* theImage);
     /*inline*/ int                  FindImage(Image* theImage);
+#ifdef WII_PLATFORM
+    void                            RebuildImageHash();
+#endif
     bool                            ImageFits(int theImageCount, const Rect& rectTest, int theMaxWidth);
     bool                            ImageFindPlaceOnSide(ReanimAtlasImage* theAtlasImageToPlace, int theImageCount, int theMaxWidth, bool theToRight);
     /*inline*/ bool                 ImageFindPlace(ReanimAtlasImage* theAtlasImageToPlace, int theImageCount, int theMaxWidth);

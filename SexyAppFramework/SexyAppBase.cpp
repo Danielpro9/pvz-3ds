@@ -33,7 +33,6 @@
 #if defined(PS2_PLATFORM)
 #include "sound/DummySoundManager.h"
 #include "platform/ps2/sound/Ps2SoundManager.h"
-#include "platform/ps2/Ps2IoLock.h"
 #include "platform/ps2/Ps2BigArena.h"
 #include "platform/ps2/Ps2PvzServices.h"
 #include "platform/ps2/Ps2Trace.h"
@@ -46,13 +45,12 @@
 #include "platform/wii/WiiHeap.h"
 #include <malloc.h>
 #include <gccore.h>
-static inline void Ps2IoLockAcquire() {}
-static inline void Ps2IoLockRelease() {}
 #else
 #include "sound/SDLSoundManager.h"
 #include "sound/SDLSoundInstance.h"
 #endif
 #include "misc/Rect.h"
+#include "misc/PlatformIoLock.h"
 #include "misc/PropertiesParser.h"
 #include "misc/PerfTimer.h"
 #include "misc/MTRand.h"
@@ -65,7 +63,7 @@ static inline void Ps2IoLockRelease() {}
 #include "misc/AutoCrit.h"
 #include "misc/Debug.h"
 #include "paklib/PakInterface.h"
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 #include "../Sexy.TodLib/TodDebug.h"
 
 extern SexyString (*gGetCurrentLevelName)();
@@ -2453,7 +2451,7 @@ void SexyAppBase::DoExit(int theCode)
 
 void SexyAppBase::UpdateFrames()
 {
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 	bool aLogUpdateFrame = Ps2ShouldLogAppUpdate();
 	if (aLogUpdateFrame) TodHesitationTrace("APPUPDATE begin");
 #endif
@@ -2465,15 +2463,15 @@ void SexyAppBase::UpdateFrames()
 			++mFPSDirtyCount;
 	}
 
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 	if (aLogUpdateFrame) TodHesitationTrace("APPUPDATE music");
 #endif
 	mMusicInterface->Update();	
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 	if (aLogUpdateFrame) TodHesitationTrace("APPUPDATE clean");
 #endif
 	CleanSharedImages();
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 	if (aLogUpdateFrame) TodHesitationTrace("APPUPDATE end");
 #endif
 }
@@ -5694,9 +5692,9 @@ Sexy::GLImage* SexyAppBase::GetImage(const std::string& theFileName, bool commit
 	// screen transitions. Falls through to an eager load if the header can't
 	// be parsed.
 	int aLazyWidth, aLazyHeight;
-	Ps2IoLockAcquire();
+	PlatformIoLockAcquire();
 	bool aLazyDimsOk = ImageLib::GetImageDims(theFileName, aLazyWidth, aLazyHeight);
-	Ps2IoLockRelease();
+	PlatformIoLockRelease();
 	if (aLazyDimsOk)
 	{
 		GLImage* aStubImage = new GLImage(mGLInterface);
@@ -5768,11 +5766,11 @@ bool SexyAppBase::LoadLazyImageBits(MemoryImage* theImage)
 	// that inverts the order and deadlocks against a concurrent purge or a
 	// draw-thread fault. Taking it here keeps every path in the same order.
 	AutoCrit anAutoCrit(mGLInterface->mCritSect);
-	Ps2IoLockAcquire();
+	PlatformIoLockAcquire();
 
 	if (!theImage->mLazyUnloaded)
 	{
-		Ps2IoLockRelease();
+		PlatformIoLockRelease();
 		return theImage->mBits != NULL;
 	}
 
@@ -5783,7 +5781,7 @@ bool SexyAppBase::LoadLazyImageBits(MemoryImage* theImage)
 	{
 		printf("[LAZY] decode requested with empty path — dropped\n");
 		theImage->mLazyUnloaded = false;
-		Ps2IoLockRelease();
+		PlatformIoLockRelease();
 		return false;
 	}
 
@@ -5804,13 +5802,13 @@ bool SexyAppBase::LoadLazyImageBits(MemoryImage* theImage)
 		printf("[LAZY] decode FAILED '%s'\n", theImage->mFilePath.c_str());
 		theImage->mLazyUnloaded = false;
 		theImage->mLazyPinned = aWasPinned;
-		Ps2IoLockRelease();
+		PlatformIoLockRelease();
 		return false;
 	}
 
 	int aWidth = aLoadedImage->GetWidth();
 	int aHeight = aLoadedImage->GetHeight();
-#if !defined(WII_PLATFORM) || WII_LOG_LEVEL >= 2
+#if !defined(WII_PLATFORM) || SEXY_LOG_LEVEL >= 2
 	printf("[LAZY] decoded '%s' %dx%d\n", theImage->mFilePath.c_str(), aWidth, aHeight);
 #endif
 
@@ -5854,7 +5852,7 @@ bool SexyAppBase::LoadLazyImageBits(MemoryImage* theImage)
 					theImage->mFilePath.c_str(), aWidth, aHeight);
 				delete aLoadedImage;
 				theImage->mLazyPinned = aWasPinned;
-				Ps2IoLockRelease();
+				PlatformIoLockRelease();
 				PurgeLazyImageBits(true);
 				return false;
 			}
@@ -5889,11 +5887,11 @@ bool SexyAppBase::LoadLazyImageBits(MemoryImage* theImage)
 
 	theImage->mLazyCleanCount = theImage->mBitsChangedCount;
 	theImage->mLazyPinned = aWasPinned;
-#if !defined(WII_PLATFORM) || WII_LOG_LEVEL >= 2
+#if !defined(WII_PLATFORM) || SEXY_LOG_LEVEL >= 2
 	printf("[LAZY] committed '%s'\n", theImage->mFilePath.c_str());
 #endif
 
-	Ps2IoLockRelease();
+	PlatformIoLockRelease();
 	return true;
 }
 
@@ -5919,7 +5917,7 @@ bool SexyAppBase::PurgeLazyImage(MemoryImage* theImage, bool theKeepTexture)
 	if (theImage->mBitsChangedCount != theImage->mLazyCleanCount)
 		return false;  // never decoded lazily, or modified at runtime
 	if (theImage->mBits == NULL && theImage->mColorIndices == NULL
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 		&& theImage->mRGBBits == NULL
 #endif
 		)
@@ -5927,7 +5925,7 @@ bool SexyAppBase::PurgeLazyImage(MemoryImage* theImage, bool theKeepTexture)
 
 	delete [] theImage->mBits;
 	theImage->mBits = NULL;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 	delete [] theImage->mRGBBits;
 	theImage->mRGBBits = NULL;
 #endif
@@ -5971,7 +5969,7 @@ void SexyAppBase::PurgeLazyImages()
 	}
 
 	AutoCrit anAutoCrit(mGLInterface->mCritSect);
-	Ps2IoLockAcquire();
+	PlatformIoLockAcquire();
 
 	int aPurged = 0;
 	for (MemoryImageSet::iterator anItr = mMemoryImageSet.begin(); anItr != mMemoryImageSet.end(); ++anItr)
@@ -5980,7 +5978,7 @@ void SexyAppBase::PurgeLazyImages()
 			aPurged++;
 	}
 
-	Ps2IoLockRelease();
+	PlatformIoLockRelease();
 	printf("[LAZY] purged %d images\n", aPurged);
 }
 
@@ -6060,7 +6058,7 @@ int SexyAppBase::PurgeLazyImageBits(bool theForce)
 		return 0;
 
 	AutoCrit anAutoCrit(mGLInterface->mCritSect);
-	Ps2IoLockAcquire();
+	PlatformIoLockAcquire();
 
 	int aPurged = 0;
 #ifdef WII_PLATFORM
@@ -6091,7 +6089,7 @@ int SexyAppBase::PurgeLazyImageBits(bool theForce)
 #endif
 	}
 
-	Ps2IoLockRelease();
+	PlatformIoLockRelease();
 
 	struct mallinfo mi = mallinfo();
 	printf("[LAZY] pressure purge: %d image bits freed, used=%.2fMB\n",
@@ -6118,7 +6116,7 @@ int SexyAppBase::PurgeLazyImageBits(bool theForce)
 					aBytes += (long)anImage->mWidth * anImage->mHeight * 4;
 				if (anImage->mColorIndices != NULL)
 					aBytes += (long)anImage->mWidth * anImage->mHeight;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 				if (anImage->mRGBBits != NULL)
 					aBytes += (long)anImage->mWidth * anImage->mHeight * 3;
 #endif

@@ -2,31 +2,15 @@
 #define __MEMORYIMAGE_H__
 
 #include "Image.h"
+#include "misc/PlatformCapabilities.h"
 
 #define OPTIMIZE_SOFTWARE_DRAWING
 #ifdef OPTIMIZE_SOFTWARE_DRAWING
 extern bool gOptimizeSoftwareDrawing;
 #endif
 
-// Lazy file-backed images: file images are created as dimension-only stubs and
-// their pixels are decoded from the pak on first GetBits(); decoded bits (and
-// the GS texture) can later be purged at screen transitions and re-decode on
-// the next use. Only enabled on PS2 (32 MB); other targets load eagerly.
-// Not optional on the targets below, despite reading like a tuning knob: the
-// dangling-Image guard in ReanimatorFreeUnusedDefinitions keys off this macro,
-// so a build that clears it while still running the asset cleaner re-arms the
-// use-after-free that guard prevents.
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
-#define SEXY_LAZY_IMAGES
-#endif
-
-// Compact (paletted) image forms -- see the full rationale on the twin
-// definition in imagelib/ImageLib.h. Repeated here rather than included because
-// it gates virtual members below: every translation unit must agree on it or
-// the vtable differs. Both spellings derive from the same compiler -D flags.
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
-#define SEXY_COMPACT_IMAGES
-#endif
+// Low-memory image capabilities are selected in misc/PlatformCapabilities.h.
+// They affect object layout, so every translation unit sees the same definitions.
 
 namespace Sexy
 {
@@ -46,7 +30,7 @@ public:
 
 	uint32_t*				mColorTable;	
 	uchar*					mColorIndices;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 	uchar*					mRGBBits;
 #endif
 	

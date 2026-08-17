@@ -375,13 +375,19 @@ bool gTodTriangleDrawAdditive = false;
 //0x4461B0
 TodTriangleGroup::TodTriangleGroup()
 {
+#if !defined(PS2_PLATFORM) && !defined(WII_PLATFORM)
 	for (int i = 0; i < 256; i++)
 		for (int j = 0; j < 3; j++)
 			mVertArray[i][j].color = 0UL;
+#endif
 
 	mImage = nullptr;
 	mTriangleCount = 0;
 	mDrawMode = Graphics::DRAWMODE_NORMAL;
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	mOneOverImageWidth = 0.0f;
+	mOneOverImageHeight = 0.0f;
+#endif
 }
 
 //0x4461F0
@@ -420,14 +426,37 @@ void TodTriangleGroup::AddTriangle(Graphics* g, Image* theImage, const SexyMatri
 	// failed to load) used to fall straight through to the mImage->mWidth /
 	// mImage->mHeight dereferences below and crash. Bail out safely instead --
 	// this just means that one effect silently doesn't draw.
-	if (theImage == nullptr)
+	if (theImage == nullptr || theImage->mWidth <= 0 || theImage->mHeight <= 0 ||
+		theSrcRect.mWidth <= 0 || theSrcRect.mHeight <= 0)
 		return;
 
 	if (mTriangleCount > 0 && (mDrawMode != theDrawMode || mImage != theImage))
 		DrawGroup(g);
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	if (mImage != theImage)
+	{
+		mOneOverImageWidth = 1.0f / theImage->mWidth;
+		mOneOverImageHeight = 1.0f / theImage->mHeight;
+	}
+#endif
 	mImage = theImage;
 	mDrawMode = theDrawMode;
 
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	float x = -theSrcRect.mWidth * 0.5f;
+	float y = -theSrcRect.mHeight * 0.5f;
+	float x2 = x + theSrcRect.mWidth;
+	float y2 = y + theSrcRect.mHeight;
+	SexyVector2 tp[4];
+	tp[0].x = theMatrix.m00 * x + theMatrix.m01 * y + theMatrix.m02 - 0.5f;
+	tp[0].y = theMatrix.m10 * x + theMatrix.m11 * y + theMatrix.m12 - 0.5f;
+	tp[1].x = theMatrix.m00 * x + theMatrix.m01 * y2 + theMatrix.m02 - 0.5f;
+	tp[1].y = theMatrix.m10 * x + theMatrix.m11 * y2 + theMatrix.m12 - 0.5f;
+	tp[2].x = theMatrix.m00 * x2 + theMatrix.m01 * y + theMatrix.m02 - 0.5f;
+	tp[2].y = theMatrix.m10 * x2 + theMatrix.m11 * y + theMatrix.m12 - 0.5f;
+	tp[3].x = theMatrix.m00 * x2 + theMatrix.m01 * y2 + theMatrix.m02 - 0.5f;
+	tp[3].y = theMatrix.m10 * x2 + theMatrix.m11 * y2 + theMatrix.m12 - 0.5f;
+#else
 	SexyVector2 p[4];
 	float x = -theSrcRect.mWidth * 0.5f;
 	float y = -theSrcRect.mHeight * 0.5f;
@@ -446,12 +475,18 @@ void TodTriangleGroup::AddTriangle(Graphics* g, Image* theImage, const SexyMatri
 		tp[i].x -= 0.5f;
 		tp[i].y -= 0.5f;
 	}
+#endif
 
 	TOD_ASSERT(theSrcRect.mX >= 0 && theSrcRect.mWidth >= 0 && theSrcRect.mX + theSrcRect.mWidth <= mImage->mWidth);
 	TOD_ASSERT(theSrcRect.mY >= 0 && theSrcRect.mHeight >= 0 && theSrcRect.mY + theSrcRect.mHeight <= mImage->mHeight);
 
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	float aOneOverWidth = mOneOverImageWidth;
+	float aOneOverHeight = mOneOverImageHeight;
+#else
 	float aOneOverWidth = 1.0f / mImage->mWidth;
 	float aOneOverHeight = 1.0f / mImage->mHeight;
+#endif
 	float aTexX1 = aOneOverWidth * theSrcRect.mX;
 	float aTexY1 = aOneOverHeight * theSrcRect.mY;
 	float aTexX2 = aOneOverWidth * (theSrcRect.mX + theSrcRect.mWidth);

@@ -74,7 +74,11 @@ public:
         if (mpAllocator == nullptr)
             mpAllocator = FindGlobalAllocator(sizeof(TodListNode<T>));
 
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+        TodListNode<T>* aNode = (TodListNode<T>*)mpAllocator->Alloc(sizeof(TodListNode<T>));
+#else
         TodListNode<T>* aNode = (TodListNode<T>*)mpAllocator->Calloc(sizeof(TodListNode<T>));
+#endif
         if (aNode)
             aNode->mValue = theHead;
         aNode->mNext = mHead;  // 新节点的下一个节点指向原节点
@@ -92,7 +96,11 @@ public:
         if (mpAllocator == nullptr)
             mpAllocator = FindGlobalAllocator(sizeof(TodListNode<T>));
 
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+        TodListNode<T>* aNode = (TodListNode<T>*)mpAllocator->Alloc(sizeof(TodListNode<T>));
+#else
         TodListNode<T>* aNode = (TodListNode<T>*)mpAllocator->Calloc(sizeof(TodListNode<T>));
+#endif
         if (aNode)
             aNode->mValue = theTail;
         aNode->mNext = nullptr;

@@ -93,6 +93,17 @@ CharData::CharData()
 	//	mKerningOffsets[i] = 0;
 }
 
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+static int GetKerningOffset(const CharData* theCharData, SexyChar theNextChar)
+{
+	CharIntMap::const_iterator anItr = theCharData->mKerningOffsets.find(theNextChar);
+	if (anItr == theCharData->mKerningOffsets.end())
+		return 0;
+
+	return anItr->second;
+}
+#endif
+
 FontLayer::FontLayer(FontData* theFontData)
 {
 	mFontData = theFontData;
@@ -1284,6 +1295,9 @@ void ImageFont::GenerateActiveFontLayers()
 		return;
 
 	mActiveLayerList.clear();
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	mActiveLayerList.reserve(mFontData->mFontLayerList.size());
+#endif
 
 	uint32_t i;
 
@@ -1524,8 +1538,21 @@ int ImageFont::CharWidthKern(SexyChar theChar, SexyChar thePrevChar)
 
 		int aLayerPointSize = anActiveFontLayer->mBaseFontLayer->mPointSize;
 
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+		CharData* aCharData = anActiveFontLayer->mBaseFontLayer->GetCharData(theChar);
+		CharData* aPrevCharData = thePrevChar != 0 ? anActiveFontLayer->mBaseFontLayer->GetCharData(thePrevChar) : nullptr;
+#endif
+
 		if (aLayerPointSize == 0)
 		{
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+			aCharWidth = aCharData->mWidth * mScale;
+
+			if (aPrevCharData != nullptr)
+				aSpacing = (anActiveFontLayer->mBaseFontLayer->mSpacing + GetKerningOffset(aPrevCharData, theChar)) * mScale;
+			else
+				aSpacing = 0;
+#else
 			aCharWidth = anActiveFontLayer->mBaseFontLayer->GetCharData(theChar)/*mCharData[(uchar) theChar].*/->mWidth * mScale;
 
 			if (thePrevChar != 0)
@@ -1537,9 +1564,18 @@ int ImageFont::CharWidthKern(SexyChar theChar, SexyChar thePrevChar)
 			}
 			else
 				aSpacing = 0;
+#endif
 		}
 		else
 		{
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+			aCharWidth = aCharData->mWidth * aPointSize / aLayerPointSize;
+
+			if (aPrevCharData != nullptr)
+				aSpacing = (anActiveFontLayer->mBaseFontLayer->mSpacing + GetKerningOffset(aPrevCharData, theChar)) * aPointSize / aLayerPointSize;
+			else
+				aSpacing = 0;
+#else
 			aCharWidth = (anActiveFontLayer->mBaseFontLayer->GetCharData(theChar)/*mCharData[(uchar) theChar].*/->mWidth * aPointSize / aLayerPointSize);
 
 			if (thePrevChar != 0)
@@ -1551,6 +1587,7 @@ int ImageFont::CharWidthKern(SexyChar theChar, SexyChar thePrevChar)
 			}
 			else
 				aSpacing = 0;
+#endif
 		}
 
 		aLayerXPos += aCharWidth + aSpacing;
@@ -1636,6 +1673,10 @@ void ImageFont::DrawStringEx(Graphics* g, int theX, int theY, const SexyString& 
 
 			int aLayerPointSize = anActiveFontLayer->mBaseFontLayer->mPointSize;
 
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+			CharData* aCharData = anActiveFontLayer->mBaseFontLayer->GetCharData(aChar);
+#endif
+
 			double aScale = mScale;
 			if (aLayerPointSize != 0)
 				aScale *= (float)mPointSize / (float)aLayerPointSize;
@@ -1645,6 +1686,16 @@ void ImageFont::DrawStringEx(Graphics* g, int theX, int theY, const SexyString& 
 				//anImageX = aLayerXPos + anActiveFontLayer->mBaseFontLayer->mOffset.mX + anActiveFontLayer->mBaseFontLayer->mCharData[(uchar) aChar].mOffset.mX;
 				//anImageY = theY - (anActiveFontLayer->mBaseFontLayer->mAscent - anActiveFontLayer->mBaseFontLayer->mOffset.mY - anActiveFontLayer->mBaseFontLayer->mCharData[(uchar) aChar].mOffset.mY);
 				//aCharWidth = anActiveFontLayer->mBaseFontLayer->mCharData[(uchar) aChar].mWidth;				
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+				anImageX = aLayerXPos + anActiveFontLayer->mBaseFontLayer->mOffset.mX + aCharData->mOffset.mX;
+				anImageY = theY - (anActiveFontLayer->mBaseFontLayer->mAscent - anActiveFontLayer->mBaseFontLayer->mOffset.mY - aCharData->mOffset.mY);
+				aCharWidth = aCharData->mWidth;
+
+				if (aNextChar != 0)
+					aSpacing = anActiveFontLayer->mBaseFontLayer->mSpacing + GetKerningOffset(aCharData, aNextChar);
+				else
+					aSpacing = 0;
+#else
 				anImageX = aLayerXPos + anActiveFontLayer->mBaseFontLayer->mOffset.mX + anActiveFontLayer->mBaseFontLayer->GetCharData(aChar)->mOffset.mX;
 				anImageY = theY - (anActiveFontLayer->mBaseFontLayer->mAscent - anActiveFontLayer->mBaseFontLayer->mOffset.mY - anActiveFontLayer->mBaseFontLayer->GetCharData(aChar)->mOffset.mY);
 				aCharWidth = anActiveFontLayer->mBaseFontLayer->GetCharData(aChar)->mWidth;
@@ -1658,12 +1709,23 @@ void ImageFont::DrawStringEx(Graphics* g, int theX, int theY, const SexyString& 
 				}
 				else
 					aSpacing = 0;
+#endif
 			}
 			else
 			{
 				//anImageX = aLayerXPos + (int) ((anActiveFontLayer->mBaseFontLayer->mOffset.mX + anActiveFontLayer->mBaseFontLayer->mCharData[(uchar) aChar].mOffset.mX) * aScale);
 				//anImageY = theY - (int) ((anActiveFontLayer->mBaseFontLayer->mAscent - anActiveFontLayer->mBaseFontLayer->mOffset.mY - anActiveFontLayer->mBaseFontLayer->mCharData[(uchar) aChar].mOffset.mY) * aScale);
 				//aCharWidth = (anActiveFontLayer->mBaseFontLayer->mCharData[(uchar) aChar].mWidth * aScale);
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+				anImageX = aLayerXPos + (int)((anActiveFontLayer->mBaseFontLayer->mOffset.mX + aCharData->mOffset.mX) * aScale);
+				anImageY = theY - (int)((anActiveFontLayer->mBaseFontLayer->mAscent - anActiveFontLayer->mBaseFontLayer->mOffset.mY - aCharData->mOffset.mY) * aScale);
+				aCharWidth = (aCharData->mWidth * aScale);
+
+				if (aNextChar != 0)
+					aSpacing = (int)((anActiveFontLayer->mBaseFontLayer->mSpacing + GetKerningOffset(aCharData, aNextChar)) * aScale);
+				else
+					aSpacing = 0;
+#else
 				anImageX = aLayerXPos + (int)((anActiveFontLayer->mBaseFontLayer->mOffset.mX + anActiveFontLayer->mBaseFontLayer->GetCharData(aChar)->mOffset.mX) * aScale);
 				anImageY = theY - (int)((anActiveFontLayer->mBaseFontLayer->mAscent - anActiveFontLayer->mBaseFontLayer->mOffset.mY - anActiveFontLayer->mBaseFontLayer->GetCharData(aChar)->mOffset.mY) * aScale);
 				aCharWidth = (anActiveFontLayer->mBaseFontLayer->GetCharData(aChar)->mWidth * aScale);
@@ -1677,6 +1739,7 @@ void ImageFont::DrawStringEx(Graphics* g, int theX, int theY, const SexyString& 
 				}
 				else
 					aSpacing = 0;
+#endif
 			}
 
 			Color aColor;
@@ -1686,7 +1749,11 @@ void ImageFont::DrawStringEx(Graphics* g, int theX, int theY, const SexyString& 
 			aColor.mAlpha = std::min((theColor.mAlpha * anActiveFontLayer->mBaseFontLayer->mColorMult.mAlpha / 255) + anActiveFontLayer->mBaseFontLayer->mColorAdd.mAlpha, 255);
 
 			//int anOrder = anActiveFontLayer->mBaseFontLayer->mBaseOrder + anActiveFontLayer->mBaseFontLayer->mCharData[(uchar) aChar].mOrder;
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+			int anOrder = layerOrderOffset + anActiveFontLayer->mBaseFontLayer->mBaseOrder + aCharData->mOrder;
+#else
 			int anOrder = layerOrderOffset + anActiveFontLayer->mBaseFontLayer->mBaseOrder + anActiveFontLayer->mBaseFontLayer->GetCharData(aChar)->mOrder;
+#endif
 
 			if (aCurPoolIdx >= POOL_SIZE)
 				break;

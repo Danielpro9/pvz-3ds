@@ -3,6 +3,7 @@
 #include "Ps2PvzServices.h"
 
 #include <kernel.h>
+#include <malloc.h>
 #include <sifrpc.h>
 #include <loadfile.h>
 #include <iopcontrol.h>
@@ -212,7 +213,7 @@ static const char* ps2_init_cdfs()
 }
 
 // Note: the debug log is NOT opened at the boot prefix. It opens exactly once,
-// at the final app-data location (<cwd>/savedata/userdata/log.txt, set by
+// at the final app-data location (<cwd>/userdata/log.txt, set by
 // TodAssertInitForApp); until then printf lines wait in the early-log buffer
 // (TodDebug.cpp). One log.txt, one location.
 static bool ps2_try_usb_save_prefix()
@@ -276,10 +277,12 @@ void Ps2PvzInitServices(const char* theArgv0)
 
     ps2_init_memory_card_stack();
 
-    // On a CD boot USB is only an optional save device, so wait only briefly for
-    // it (2s) before falling back to the memory card; otherwise keep the full
-    // ~10s enumeration window used when the game is launched from the stick.
-    if (ps2_init_usb_mass(aHostFs) && ps2_wait_for_mass_device(aCdBoot ? 20 : 100))
+    // USB still has to enumerate after the IOP reboot when the ELF was launched
+    // from mass:. Only a CD boot needs a separate writable save prefix, though;
+    // normal USB/host boots use the ELF directory selected later by SexyAppBase.
+    const bool aMassReady = ps2_init_usb_mass(aHostFs) &&
+        ps2_wait_for_mass_device(aCdBoot ? 20 : 100);
+    if (aCdBoot && aMassReady)
         ps2_try_usb_save_prefix();
 
     ps2_init_usb_mouse();
@@ -296,11 +299,12 @@ void Ps2PvzInitServices(const char* theArgv0)
 
     ps2_init_audio();
 
-    if (s_savePrefix.empty())
+    if (aCdBoot && s_savePrefix.empty())
         ps2_try_memory_card_save_prefix();
 
-    // If both fail the prefix stays empty = current directory (PCSX2 host fs,
-    // or read-only media: saves fail gracefully but the game runs).
+    // Non-CD boots intentionally keep an empty prefix here. SexyAppBase adopts
+    // the ELF's cwd as the final app-data directory after startup completes.
+    // On CD, an empty prefix means neither USB nor memory card was writable.
 
     printf("[PS2] save prefix: '%s'  resource prefix: '%s'  audio: %s  mouse: %s\n",
            s_savePrefix.c_str(), s_resourcePrefix.c_str(),
@@ -326,6 +330,12 @@ bool Ps2AudioAvailable(void)
 bool Ps2MouseAvailable(void)
 {
     return s_mouseAvailable;
+}
+
+bool Ps2ShouldPurgeAssets(void)
+{
+    const struct mallinfo aHeap = mallinfo();
+    return (long)aHeap.uordblks > (18L << 20);
 }
 
 #endif // PS2_PLATFORM

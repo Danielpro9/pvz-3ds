@@ -47,7 +47,6 @@
 #include "Lawn/Ps2BoardControls.h"
 #endif
 #ifdef PS2_PLATFORM
-#include <malloc.h>                        // mallinfo() (heap-pressure checks)
 #include "platform/ps2/Ps2PvzServices.h"  // Ps2PvzServices helpers
 #include "platform/ps2/Ps2Trace.h"        // Ps2Trace / Ps2TraceBeat (startup tracer)
 #endif
@@ -369,10 +368,6 @@ void LawnApp::KillBoard()
 }
 
 #ifdef LOW_MEMORY
-#ifdef PS2_PLATFORM
-#include <malloc.h>
-#endif
-
 // Purging everything at every transition forced a mass re-decode of images
 // and sounds right after (visible as a burst of hitches). The heap ceiling is
 // ~26MB (32MB minus the ELF image and stacks), so while actual usage is low
@@ -380,8 +375,7 @@ void LawnApp::KillBoard()
 bool LawnApp::ShouldPurgeAssets()
 {
 #ifdef PS2_PLATFORM
-	struct mallinfo mi = mallinfo();
-	return (long)mi.uordblks > (18L << 20);
+	return Ps2ShouldPurgeAssets();
 #else
 	return true;
 #endif
@@ -852,6 +846,16 @@ void LawnApp::DoPauseDialog()
 	mBoard->Pause(true);
 	//FinishModelessDialogs();
 
+#ifdef LOW_MEMORY
+	// The pause dialog's newspaper reanimation asks for fresh texture memory
+	// while the board (still fully resident behind it) is at its heaviest —
+	// worst case on Night levels with tombstones. CreateTextures fails
+	// silently on OOM (leaves the sprite undrawn, retried every frame) rather
+	// than freeing anything itself, so reclaim genuinely unreferenced assets
+	// first.
+	PurgeUnusedAssets();
+#endif
+
 	LawnDialog* aDialog = (LawnDialog*)DoDialog(
 		Dialogs::DIALOG_PAUSED,
 		true,
@@ -963,12 +967,16 @@ void LawnApp::DoCreateUserDialog()
 	// the first free "Player N", which also avoids the name-conflict path when
 	// more than one profile is made.
 	//
-	// Text entry does exist now (WiiOnScreenKeyboard, raised by
+	// Text entry does exist now (the shared VirtualKeyboard, raised by
 	// SexyAppBase::StartTextInput), so this is no longer what makes the dialog
 	// dismissable -- it is a safety net while that keyboard is unproven, and a
 	// convenience for players who would rather click OK than type. Drop it once
 	// the keyboard has been confirmed on hardware; the cost of keeping it is
 	// that naming a profile starts with clearing the default.
+	//
+	// PS2 deliberately has no equivalent: it used to auto-create a "Player"
+	// profile at startup precisely because it had no text entry, and that was
+	// removed when the keyboard reached it, so PS2 players name themselves.
 	{
 		SexyString aDefaultName;
 		for (int i = 1; i <= 99; i++)
@@ -1448,18 +1456,6 @@ void LawnApp::Init()
 	{
 		mPlayerInfo = mProfileMgr->GetAnyProfile();
 	}
-#ifdef PS2_PLATFORM
-	// PS2 has no working on-screen text entry, so the "Enter Your Name" new-user
-	// dialog can never be completed and the Game Selector gets stuck in
-	// SELECTOR_NEW_USER (buttons never appear). If no profile exists yet,
-	// auto-create a default one so the selector goes straight to SELECTOR_IDLE.
-	if (mPlayerInfo == nullptr)
-	{
-		mPlayerInfo = mProfileMgr->AddProfile(__S("Player"));
-		if (mPlayerInfo != nullptr)
-			mProfileMgr->Save();
-	}
-#endif
 
 	mMaxExecutions = GetInteger("MaxExecutions", 0);
 	mMaxPlays = GetInteger("MaxPlays", 0);

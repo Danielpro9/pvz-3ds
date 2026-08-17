@@ -7,7 +7,7 @@
 #include "SexyAppBase.h"
 #include "misc/PerfTimer.h"
 #include "misc/Debug.h"
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 #include "../../Sexy.TodLib/TodDebug.h"
 
 extern SexyString (*gGetCurrentLevelName)();
@@ -494,7 +494,7 @@ bool WidgetManager::DrawScreen()
 bool WidgetManager::UpdateFrame()
 {
 	SEXY_AUTO_PERF("WidgetManager::UpdateFrame");
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 	bool aLogWidgetManagerUpdate = Ps2ShouldLogWidgetManagerUpdate();
 	if (aLogWidgetManagerUpdate)
 		TodHesitationTrace("WMUPDATE begin widgets=%d dirty=%d", (int)mWidgets.size(), mDirty ? 1 : 0);
@@ -507,7 +507,7 @@ bool WidgetManager::UpdateFrame()
 	mUpdateCnt++;
 	mLastWMUpdateCount = mUpdateCnt;	
 	UpdateAll(&aModalFlags);
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 	if (aLogWidgetManagerUpdate)
 		TodHesitationTrace("WMUPDATE end dirty=%d", mDirty ? 1 : 0);
 #endif

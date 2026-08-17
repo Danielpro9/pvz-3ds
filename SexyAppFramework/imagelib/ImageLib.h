@@ -2,23 +2,10 @@
 #define __IMAGELIB_H__
 
 #include <string>
+#include "misc/PlatformCapabilities.h"
 
-// Compact image forms: a paletted PNG stays as a 256-entry colour table plus one
-// index byte per pixel instead of being expanded to w*h*4 at decode time. A
-// 1400x600 background costs ~840KB this way rather than 3.36MB, and -- the part
-// that matters more than the total -- the texture upload reads the indices
-// directly (CopyImageToTexture* in platform/pc/graphics/GLInterface.cpp), so
-// the 3.36MB *contiguous* block is never requested at all. Consumers that do
-// need packed pixels call GetBits(), which expands on demand.
-//
-// This macro CHANGES THE LAYOUT of ImageLib::Image and the vtable of
-// MemoryImage, so every translation unit has to agree on it. The condition is
-// deliberately spelled out from compiler-defined platform macros in both
-// headers rather than shared through an include, so the two cannot drift; the
-// twin definition is in graphics/MemoryImage.h.
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
-#define SEXY_COMPACT_IMAGES
-#endif
+// Compact image capabilities are selected in misc/PlatformCapabilities.h.
+// SEXY_COMPACT_IMAGES changes Image layout and must be identical in every TU.
 
 namespace ImageLib
 {
@@ -32,8 +19,8 @@ public:
 #ifdef SEXY_COMPACT_IMAGES
 	uint32_t*				mColorTable;
 	unsigned char*			mColorIndices;
-	// 24-bit RGB, PS2 only: its texture upload expands one piece at a time, and
-	// no other target has a path that can read this form. Always NULL elsewhere.
+	// Optional 24-bit RGB storage. Only backends with SEXY_COMPACT_RGB_IMAGES
+	// populate it; keeping the member in all compact-image builds preserves layout.
 	unsigned char*			mRGBBits;
 	bool					mHasTrans;
 	bool					mHasAlpha;

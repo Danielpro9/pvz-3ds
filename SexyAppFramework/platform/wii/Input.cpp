@@ -7,7 +7,7 @@
 #include "SexyAppBase.h"
 #include "misc/KeyCodes.h"
 #include "widget/WidgetManager.h"
-#include "wii/WiiOnScreenKeyboard.h"
+#include "widget/VirtualKeyboard.h"
 #include "../../../LawnApp.h"
 #include "../../../Lawn/Board.h"
 #include "../../../Lawn/Widget/SeedChooserScreen.h"
@@ -92,34 +92,14 @@ void SexyAppBase::InitInput()
 	mMouseIn = true;
 }
 
-// The on-screen keyboard, created on first use and reused thereafter. It is
-// owned here rather than by SexyAppBase so no cross-platform header has to
-// learn about a Wii-only widget.
-static WiiOnScreenKeyboard* sOnScreenKeyboard = NULL;
-
 bool SexyAppBase::StartTextInput(std::string&)
 {
-	// EditWidget calls this from GotFocus, so a field is now ready for input.
-	if (mWidgetManager == NULL)
-		return false;
-
-	if (sOnScreenKeyboard == NULL)
-		sOnScreenKeyboard = new WiiOnScreenKeyboard();
-
-	sOnScreenKeyboard->LayoutForScreen(mWidth, mHeight);
-	mWidgetManager->AddWidget(sOnScreenKeyboard);
-	mWidgetManager->BringToFront(sOnScreenKeyboard);
-
-	// False: we do not hand back a pre-composed string the way a system IME
-	// would. The keyboard types into the field live, through ordinary key
-	// events, so the field must keep whatever text it already had.
-	return false;
+	return VirtualKeyboardShow(this);
 }
 
 void SexyAppBase::StopTextInput()
 {
-	if (sOnScreenKeyboard != NULL && mWidgetManager != NULL)
-		mWidgetManager->RemoveWidget(sOnScreenKeyboard);
+	VirtualKeyboardHide(this);
 }
 
 bool SexyAppBase::ProcessDeferredMessages(bool)
@@ -184,6 +164,29 @@ bool SexyAppBase::ProcessDeferredMessages(bool)
 	const bool anAIsHeld = (wpad & WPAD_BUTTON_A) != 0 || (pad & PAD_BUTTON_A) != 0;
 	const bool anAWasHeld = (sPrevWpad & WPAD_BUTTON_A) != 0 ||
 		(sPrevPad & PAD_BUTTON_A) != 0;
+
+	// On-screen keyboard: hand it the D-Pad, A and B while the player is
+	// driving it that way. It returns false in pointer mode, where the IR
+	// aims at keys and everything below behaves as it always has.
+	unsigned int aNav = 0;
+	if ((wpad & WPAD_BUTTON_LEFT) || (pad & PAD_BUTTON_LEFT))	aNav |= VKNAV_LEFT;
+	if ((wpad & WPAD_BUTTON_RIGHT) || (pad & PAD_BUTTON_RIGHT))	aNav |= VKNAV_RIGHT;
+	if ((wpad & WPAD_BUTTON_UP) || (pad & PAD_BUTTON_UP))		aNav |= VKNAV_UP;
+	if ((wpad & WPAD_BUTTON_DOWN) || (pad & PAD_BUTTON_DOWN))	aNav |= VKNAV_DOWN;
+	if (anAIsHeld)												aNav |= VKNAV_ACCEPT;
+	if ((wpad & WPAD_BUTTON_B) || (pad & PAD_BUTTON_B))			aNav |= VKNAV_BACK;
+	const bool aKeyboardNav = VirtualKeyboardFeedNav(aNav);
+
+	if (aKeyboardNav)
+	{
+		// The keyboard owns these this frame. Still track the edge state below
+		// so releasing a button after the keyboard closes is not seen as a
+		// fresh press.
+		sPrevWpad = wpad;
+		sPrevPad = pad;
+		return false;
+	}
+
 	if (anAIsHeld && !anAWasHeld)
 	{
 		sAUsesKeyboardSelection = aKeyboardSeedSelected;
@@ -217,10 +220,16 @@ bool SexyAppBase::ProcessDeferredMessages(bool)
 			SendKey(this, aDirection.key, false);
 	}
 
+	const bool aBoardIsActive = gLawnApp != NULL && gLawnApp->mBoard != NULL &&
+		gLawnApp->mGameScene == GameScenes::SCENE_PLAYING &&
+		!gLawnApp->mBoard->mPaused && gLawnApp->GetDialogCount() == 0;
 	if ((wDown & WPAD_BUTTON_PLUS) || (pDown & PAD_BUTTON_START))
-		mWidgetManager->KeyDown(KEYCODE_ESCAPE);
+		SendKey(this, aBoardIsActive ? KEYCODE_ESCAPE : KEYCODE_RETURN, true);
 	if ((wUp & WPAD_BUTTON_PLUS) || (pUp & PAD_BUTTON_START))
-		mWidgetManager->KeyUp(KEYCODE_ESCAPE);
+	{
+		SendKey(this, KEYCODE_ESCAPE, false);
+		SendKey(this, KEYCODE_RETURN, false);
+	}
 	if (wDown & WPAD_BUTTON_HOME)
 	{
 		mShutdown = true;

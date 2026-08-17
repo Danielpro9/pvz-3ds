@@ -33,11 +33,27 @@
 //#define SEXY_PERF_ENABLED
 #include "misc/PerfTimer.h"
 #include "Widget/AchievementsScreen.h"
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#include <stdint.h>
+#endif
+
+#ifdef PS2_PLATFORM
+#include "../SexyAppFramework/platform/ps2/Ps2BigArena.h"
+#include "../SexyAppFramework/platform/ps2/Ps2RenderStats.h"
+#include "../SexyAppFramework/platform/ps2/Ps2VramAllocator.h"
+#endif
 
 //#define SEXY_MEMTRACE
 //#include "../SexyAppFramework/memmgr.h"
 
 bool gShownMoreSunTutorial = false;
+
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+static Board* gPlantGridCacheBoard = nullptr;
+static PlantsOnLawn gPlantGridCache[MAX_GRID_SIZE_X][MAX_GRID_SIZE_Y];
+static bool gPlantGridCacheDirty = true;
+static RenderItem gRenderSortScratch[MAX_RENDER_ITEMS];
+#endif
 
 //0x407B50
 // GOTY @Patoke: 0x40A3C0
@@ -63,6 +79,9 @@ Board::Board(LawnApp* theApp)
 	mPlants.DataArrayInitialize(1024U, "plants");
 	mProjectiles.DataArrayInitialize(1024U, "projectiles");
 	mCoins.DataArrayInitialize(1024U, "coins");
+#endif
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	InvalidatePlantGridCache();
 #endif
 	mLawnMowers.DataArrayInitialize(32U, "lawnmowers");
 	mGridItems.DataArrayInitialize(128U, "griditems");
@@ -2165,6 +2184,9 @@ Plant* Board::NewPlant(int theGridX, int theGridY, SeedType theSeedType, SeedTyp
 	Plant* aPlant = mPlants.DataArrayAlloc();
 	aPlant->mIsOnBoard = true;
 	aPlant->PlantInitialize(theGridX, theGridY, theSeedType, theImitaterType);
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	InvalidatePlantGridCache();
+#endif
 	return aPlant;
 }
 
@@ -2285,6 +2307,75 @@ Plant* Board::GetFlowerPotAt(int theGridX, int theGridY)
 	return nullptr;
 }
 
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+void Board::InvalidatePlantGridCache()
+{
+	gPlantGridCacheBoard = this;
+	gPlantGridCacheDirty = true;
+}
+
+void Board::RebuildPlantGridCache()
+{
+	for (int aGridX = 0; aGridX < MAX_GRID_SIZE_X; aGridX++)
+	{
+		for (int aGridY = 0; aGridY < MAX_GRID_SIZE_Y; aGridY++)
+		{
+			PlantsOnLawn& aPlantsOnLawn = gPlantGridCache[aGridX][aGridY];
+			aPlantsOnLawn.mUnderPlant = nullptr;
+			aPlantsOnLawn.mPumpkinPlant = nullptr;
+			aPlantsOnLawn.mFlyingPlant = nullptr;
+			aPlantsOnLawn.mNormalPlant = nullptr;
+		}
+	}
+
+	Plant* aPlant = nullptr;
+	while (IteratePlants(aPlant))
+	{
+		if (aPlant->mRow < 0 || aPlant->mRow >= MAX_GRID_SIZE_Y || aPlant->NotOnGround())
+			continue;
+
+		SeedType aSeedType = aPlant->mSeedType;
+		if (aSeedType == SeedType::SEED_IMITATER && aPlant->mImitaterType != SeedType::SEED_NONE)
+			aSeedType = aPlant->mImitaterType;
+
+		int aLastGridX = aPlant->mPlantCol;
+		if (aSeedType == SeedType::SEED_COBCANNON)
+			aLastGridX++;
+
+		for (int aGridX = aPlant->mPlantCol; aGridX <= aLastGridX; aGridX++)
+		{
+			if (aGridX < 0 || aGridX >= MAX_GRID_SIZE_X)
+				continue;
+
+			PlantsOnLawn& aPlantsOnLawn = gPlantGridCache[aGridX][aPlant->mRow];
+			if (Plant::IsFlying(aPlant->mSeedType))
+			{
+				TOD_ASSERT(!aPlantsOnLawn.mFlyingPlant);
+				aPlantsOnLawn.mFlyingPlant = aPlant;
+			}
+			else if (aSeedType == SeedType::SEED_FLOWERPOT || (aSeedType == SeedType::SEED_LILYPAD && mApp->mGameMode != GameMode::GAMEMODE_CHALLENGE_ZEN_GARDEN))
+			{
+				TOD_ASSERT(!aPlantsOnLawn.mUnderPlant);
+				aPlantsOnLawn.mUnderPlant = aPlant;
+			}
+			else if (aSeedType == SeedType::SEED_PUMPKINSHELL)
+			{
+				TOD_ASSERT(!aPlantsOnLawn.mPumpkinPlant);
+				aPlantsOnLawn.mPumpkinPlant = aPlant;
+			}
+			else
+			{
+				TOD_ASSERT(!aPlantsOnLawn.mNormalPlant);
+				aPlantsOnLawn.mNormalPlant = aPlant;
+			}
+		}
+	}
+
+	gPlantGridCacheBoard = this;
+	gPlantGridCacheDirty = false;
+}
+#endif
+
 //0x40D2A0
 void Board::GetPlantsOnLawn(int theGridX, int theGridY, PlantsOnLawn* thePlantOnLawn)
 {
@@ -2299,6 +2390,12 @@ void Board::GetPlantsOnLawn(int theGridX, int theGridY, PlantsOnLawn* thePlantOn
 	if (mApp->IsWallnutBowlingLevel() && !mCutScene->IsInShovelTutorial())
 		return;
 
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	if (gPlantGridCacheBoard != this || gPlantGridCacheDirty)
+		RebuildPlantGridCache();
+
+	*thePlantOnLawn = gPlantGridCache[theGridX][theGridY];
+#else
 	Plant* aPlant = nullptr;
 	while (IteratePlants(aPlant))
 	{
@@ -2354,6 +2451,7 @@ void Board::GetPlantsOnLawn(int theGridX, int theGridY, PlantsOnLawn* thePlantOn
 			thePlantOnLawn->mNormalPlant = aPlant;
 		}
 	}
+#endif
 }
 
 Plant* Board::GetTopPlantAt(int theGridX, int theGridY, PlantPriority thePriority)
@@ -5371,6 +5469,14 @@ void Board::ZombiesWon(Zombie* theZombie)
 	StopAllZombieSounds();
 	mApp->PlaySample(Sexy::SOUND_LOSEMUSIC);
 
+#ifdef LOW_MEMORY
+	// This is the board's heaviest possible moment (every wave that survived
+	// is still resident) and REANIM_ZOMBIES_WON is never preloaded under
+	// LOW_MEMORY (see ReanimatorLoadDefinitions), so the load right below is
+	// a genuine on-demand alloc. Reclaim unreferenced assets first so
+	// CreateTextures doesn't fail silently on the game-over screen itself.
+	mApp->PurgeUnusedAssets();
+#endif
 	ReanimatorEnsureDefinitionLoaded(ReanimationType::REANIM_ZOMBIES_WON, true);
 	Reanimation* aReanim = mApp->AddReanimation(-BOARD_OFFSET, 0, MakeRenderOrder(RenderLayer::RENDER_LAYER_SCREEN_FADE, 0, 0), ReanimationType::REANIM_ZOMBIES_WON);
 	aReanim->mLoopType = ReanimLoopType::REANIM_PLAY_ONCE_AND_HOLD;
@@ -5973,6 +6079,9 @@ void Board::Update()
 
 	Widget::Update();
 	MarkDirty();
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	InvalidatePlantGridCache();
+#endif
 
 	mCutScene->Update();
 	UpdateMousePosition();
@@ -6072,7 +6181,9 @@ void Board::UpdateLayers()
 {
 	if (mWidgetManager)
 	{
+#if !defined(PS2_PLATFORM) && !defined(WII_PLATFORM)
 		mWidgetManager->MarkAllDirty();
+#endif
 
 		for (DialogList::iterator anIter = mApp->mDialogList.begin(); anIter != mApp->mDialogList.end(); ++anIter)
 		{
@@ -6214,6 +6325,125 @@ bool RenderItemSortFunc(const RenderItem& theItem1, const RenderItem& theItem2)
 
 	return theItem1.mZPos < theItem2.mZPos;
 }
+
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+static unsigned int RenderItemRadixByte(const RenderItem& theItem, unsigned int thePass)
+{
+	uint32_t aZKey = (uint32_t)theItem.mZPos ^ 0x80000000U;
+	return (aZKey >> (thePass * 8U)) & 0xFFU;
+}
+
+static unsigned int RenderItemPointerRadixByte(const RenderItem& theItem, unsigned int thePass)
+{
+	uintptr_t aPointerValue = reinterpret_cast<uintptr_t>(theItem.mGameObject);
+	return (unsigned int)((aPointerValue >> (thePass * 8U)) & 0xFFU);
+}
+
+static void RenderItemPointerSort(RenderItem* theRenderList, int theRenderItemCount)
+{
+	if (theRenderItemCount <= 16)
+	{
+		for (int i = 1; i < theRenderItemCount; i++)
+		{
+			RenderItem anItem = theRenderList[i];
+			uintptr_t aPointerValue = reinterpret_cast<uintptr_t>(anItem.mGameObject);
+			int aPosition = i;
+			while (aPosition > 0 && reinterpret_cast<uintptr_t>(theRenderList[aPosition - 1].mGameObject) > aPointerValue)
+			{
+				theRenderList[aPosition] = theRenderList[aPosition - 1];
+				aPosition--;
+			}
+			theRenderList[aPosition] = anItem;
+		}
+		return;
+	}
+
+	RenderItem* aSource = theRenderList;
+	RenderItem* aDestination = gRenderSortScratch;
+	for (unsigned int aPass = 0; aPass < sizeof(uintptr_t); aPass++)
+	{
+		unsigned int aCounts[256] = { 0 };
+		for (int i = 0; i < theRenderItemCount; i++)
+			aCounts[RenderItemPointerRadixByte(aSource[i], aPass)]++;
+
+		unsigned int anOffset = 0;
+		for (unsigned int i = 0; i < 256; i++)
+		{
+			unsigned int aCount = aCounts[i];
+			aCounts[i] = anOffset;
+			anOffset += aCount;
+		}
+
+		for (int i = 0; i < theRenderItemCount; i++)
+		{
+			unsigned int aBucket = RenderItemPointerRadixByte(aSource[i], aPass);
+			aDestination[aCounts[aBucket]++] = aSource[i];
+		}
+
+		RenderItem* aSwap = aSource;
+		aSource = aDestination;
+		aDestination = aSwap;
+	}
+
+	if (aSource != theRenderList)
+	{
+		for (int i = 0; i < theRenderItemCount; i++)
+			theRenderList[i] = aSource[i];
+	}
+}
+
+static void RenderItemRadixSort(RenderItem* theRenderList, int theRenderItemCount)
+{
+	if (theRenderItemCount <= 1)
+		return;
+
+	RenderItem* aSource = theRenderList;
+	RenderItem* aDestination = gRenderSortScratch;
+	const unsigned int aPassCount = sizeof(uint32_t);
+	for (unsigned int aPass = 0; aPass < aPassCount; aPass++)
+	{
+		unsigned int aCounts[256] = { 0 };
+		for (int i = 0; i < theRenderItemCount; i++)
+			aCounts[RenderItemRadixByte(aSource[i], aPass)]++;
+
+		unsigned int anOffset = 0;
+		for (unsigned int i = 0; i < 256; i++)
+		{
+			unsigned int aCount = aCounts[i];
+			aCounts[i] = anOffset;
+			anOffset += aCount;
+		}
+
+		for (int i = 0; i < theRenderItemCount; i++)
+		{
+			unsigned int aBucket = RenderItemRadixByte(aSource[i], aPass);
+			aDestination[aCounts[aBucket]++] = aSource[i];
+		}
+
+		RenderItem* aSwap = aSource;
+		aSource = aDestination;
+		aDestination = aSwap;
+	}
+
+	if (aSource != theRenderList)
+	{
+		for (int i = 0; i < theRenderItemCount; i++)
+			theRenderList[i] = aSource[i];
+	}
+
+	int aRunStart = 0;
+	while (aRunStart < theRenderItemCount)
+	{
+		int aRunEnd = aRunStart + 1;
+		while (aRunEnd < theRenderItemCount && theRenderList[aRunEnd].mZPos == theRenderList[aRunStart].mZPos)
+			aRunEnd++;
+
+		RenderItemPointerSort(theRenderList + aRunStart, aRunEnd - aRunStart);
+
+		aRunStart = aRunEnd;
+	}
+}
+#endif
 
 //0x4166C0
 void Board::AddBossRenderItem(RenderItem* theRenderList, int& theCurRenderItem, Zombie* theBossZombie)
@@ -6358,6 +6588,53 @@ static inline void AddUIRenderItem(RenderItem* theRenderList, int& theCurRenderI
 void Board::DrawGameObjects(Graphics* g)
 {
 	TodHesitationTrace("creating render list");
+
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 1
+	static int sLastStressFrame = -1;
+	if ((mMainCounter % 120) == 0 && mMainCounter != sLastStressFrame)
+	{
+		sLastStressFrame = mMainCounter;
+		unsigned int aParticleSystems = 0;
+		unsigned int aReanimations = 0;
+		if (mApp->mEffectSystem != nullptr)
+		{
+			if (mApp->mEffectSystem->mParticleHolder != nullptr)
+				aParticleSystems = mApp->mEffectSystem->mParticleHolder->mParticleSystems.mSize;
+			if (mApp->mEffectSystem->mReanimationHolder != nullptr)
+				aReanimations = mApp->mEffectSystem->mReanimationHolder->mReanimations.mSize;
+		}
+
+		unsigned int aRenderBase = mPlants.mSize + mCoins.mSize + mZombies.mSize +
+			mProjectiles.mSize + mLawnMowers.mSize + mGridItems.mSize +
+			aParticleSystems + aReanimations;
+		char aStressLine[320];
+		TodSnprintf(aStressLine, sizeof(aStressLine),
+			"[PS2][STRESS] frame=%d zombies=%u/%u plants=%u/%u projectiles=%u/%u "
+			"coins=%u/%u particles=%u reanimations=%u renderBase=%u/%u "
+			"bigArena=%uKB/%uKB\n",
+			mMainCounter, mZombies.mSize, mZombies.mMaxSize, mPlants.mSize, mPlants.mMaxSize,
+			mProjectiles.mSize, mProjectiles.mMaxSize, mCoins.mSize, mCoins.mMaxSize,
+			aParticleSystems, aReanimations, aRenderBase, MAX_RENDER_ITEMS,
+			Ps2BigUsedBytes() / 1024U, PS2_BIG_ARENA_BYTES / 1024U);
+		TodForceAppendToDebugLog(aStressLine);
+
+		// Texture residency for the same frame. Sustained uploads mean the
+		// working set does not fit in VRAM and each miss costs a GS fence.
+		char aTextureLine[320];
+		TodSnprintf(aTextureLine, sizeof(aTextureLine),
+			"[PS2][VRAM] frame=%d uploads=%d evictions=%d resident=%d rewinds=%d "
+			"uploadsTotal=%d cluts=%d clutShared=%dKB vram=%dKB recycled=%dKB blocks=%d "
+			"queueFlush=%d/%d gifReset=%d\n",
+			mMainCounter, ps2_dbg_texture_uploads_frame(), ps2_dbg_texture_evictions_frame(),
+			ps2_dbg_texture_resident_count(), ps2_dbg_texture_arena_rewinds(),
+			ps2_dbg_texture_uploads_total(), ps2_dbg_clut_unique_count(),
+			ps2_dbg_clut_shared_kb(), ps2_dbg_vram_current_kb(),
+			ps2_dbg_vram_recycled_kb(), ps2_dbg_vram_free_blocks(),
+			ps2_dbg_queue_flushes_frame(), ps2_dbg_queue_flushes_total(),
+			ps2_dbg_gif_recoveries());
+		TodForceAppendToDebugLog(aTextureLine);
+	}
+#endif
 
 	RenderItem aRenderList[MAX_RENDER_ITEMS];
 	int aRenderItemCount = 0;
@@ -6561,7 +6838,11 @@ void Board::DrawGameObjects(Graphics* g)
 	AddGameObjectRenderItemCursorPreview(aRenderList, aRenderItemCount, RenderObjectType::RENDER_ITEM_CURSOR_PREVIEW, mCursorPreview);
 
 	TodHesitationTrace("start sort");
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	RenderItemRadixSort(aRenderList, aRenderItemCount);
+#else
 	std::sort(aRenderList, aRenderList + aRenderItemCount, RenderItemSortFunc);
+#endif
 
 	TodHesitationTrace("end sort, start draw");
 	for (int i = 0; i < aRenderItemCount; i++)

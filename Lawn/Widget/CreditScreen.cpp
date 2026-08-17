@@ -353,7 +353,12 @@ CreditScreen::CreditScreen(LawnApp* theApp)
 	mDrawCount = 0;
     mLastDrawCount = 0;
 	mBlinkCountdown = 700;
+#ifdef WII_PLATFORM
+    // habilitar los creditos pero crashea a la mierda al final
 	mDontSync = false;
+#else
+	mDontSync = false;
+#endif
 	mCreditsPaused = false;
 	mPreloaded = false;
 

@@ -6,7 +6,7 @@
 #include <stdio.h>
 
 #include "SexyAppBase.h"
-#include "graphics/GLInterface.h"
+#include "graphics/Ps2GraphicsInterface.h"
 #include "graphics/GLImage.h"
 #include "widget/WidgetManager.h"
 
@@ -25,13 +25,24 @@ static void InitPs2GsKit()
 		D_CTRL_STD_OFF, D_CTRL_RCYC_8, 1 << DMA_CHANNEL_GIF);
 	dmaKit_chan_init(DMA_CHANNEL_GIF);
 
-	// Custom queue sizes instead of gsKit_init_global()'s defaults (1MB oneshot
-	// + 256KB persistent, x2 buffers each = 2.5MB of heap). The persistent
-	// queue is never used (everything renders GS_ONESHOT, switched below) and
-	// oneshot overflow is handled by ps2_gs_queue_guard in gles_ps2.cpp, which
-	// execs+resets the queue mid-frame with nothing dropped — so a small pool
-	// only costs extra flushes on monster frames, never corruption. ~1.7MB back.
-	gsGlobal = gsKit_init_global_custom(384 * 1024, 32 * 1024);
+	// Only the persistent queue is shrunk from gsKit_init_global()'s defaults:
+	// it is never used (everything renders GS_ONESHOT, switched below), so
+	// 256KB -> 32KB x2 buffers is free.
+	//
+	// The oneshot pool MUST stay at gsKit's 1MB. It was cut to 384KB on
+	// 2026-07-18 to save heap, on the theory that overflow is harmless because
+	// Ps2GsCommandGuardQueueBytesRaw executes the queue mid-frame and drops
+	// nothing. That theory was wrong, and it cost a hard freeze on real
+	// hardware (2026-08-17): gsKit's mid-frame exec waits for the previous
+	// batch's GS FINISH with a bare, timeout-less spin on the CSR, so it can
+	// never return if the GIF does not raise FINISH. PCSX2 always raises it
+	// promptly and never reproduced this.
+	//
+	// So the guard is a corruption backstop, not a routine path. Sizing the
+	// pool so a heavy frame (a full zombie horde) fits without tripping it is
+	// what keeps the main thread out of that spin. Shrink this again only
+	// together with a bounded FINISH wait at the call site.
+	gsGlobal = gsKit_init_global_custom(1024 * 1024, 32 * 1024);
 	bool isPal = graph_get_region() == GRAPH_MODE_PAL;
 	gsGlobal->Mode = isPal ? GS_MODE_PAL : GS_MODE_NTSC;
 	// FRAME (not FIELD): with FIELD rendering, anything that moves shears into
@@ -72,11 +83,11 @@ void SexyAppBase::MakeWindow()
 
 	if (mGLInterface == NULL)
 	{
-		printf("[PS2] creating GLInterface\n");
+		printf("[PS2] creating native GS graphics interface\n");
 		mGLInterface = new GLInterface(this);
-		printf("[PS2] InitGLInterface begin\n");
+		printf("[PS2] native graphics init begin\n");
 		InitGLInterface();
-		printf("[PS2] InitGLInterface done\n");
+		printf("[PS2] native graphics init done\n");
 	}
 
 	bool isActive = mActive;

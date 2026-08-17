@@ -5,23 +5,7 @@
 // cannot be forward-declared as `struct GXRModeObj`. Pull in the real header.
 #include <ogc/gx_struct.h>
 
-// Diagnostic verbosity. Set by cmake/wii.cmake; the fallback here is so that
-// compiling a file on its own does not silently pick a different level.
-//
-//   0  Off. wiiLog formats nothing and touches no channel, and opengx's own
-//      warnings are silenced too (gx_wii.cpp). Nothing in the running game
-//      writes to the SD card, the screen, or the Gecko port.
-//
-//   1  Boot and milestones. The default. Everything that fires once -- storage
-//      probing, GX bring-up, world-load RAM milestones, texture failures -- and
-//      nothing that fires on a timer or per asset.
-//
-//   2  Verbose. Adds periodic frame/world/heap reports, per-texture loads,
-//      rate-limited GL/OpenGX errors and the model-transform trace. Useful, and
-//      NOT free: see the cost note on wiiLog's channel 3.
-#ifndef WII_LOG_LEVEL
-#define WII_LOG_LEVEL 1
-#endif
+// Logging verbosity is shared with every platform through SEXY_LOG_LEVEL.
 
 // Writes a diagnostic line to every channel that might be watched.
 //
@@ -33,7 +17,7 @@
 //
 // Cheap during boot and still synchronous afterwards. The session file stays
 // open, but every message is flushed so crash evidence reaches FAT immediately.
-// Anything that can fire inside a frame belongs behind WII_LOG_LEVEL 2.
+// Anything that can fire inside a frame belongs behind SEXY_LOG_LEVEL 2.
 extern "C" void wiiLog(const char *fmt, ...)
 	__attribute__((format(printf, 1, 2)));
 
@@ -48,7 +32,7 @@ extern "C" void wiiLog(const char *fmt, ...)
 //
 // So: keep them, slow them down. Verbose restores the fast cadence, which is
 // what you want when you are actually watching for a stall.
-#define WII_LIVENESS_INTERVAL_MS ((WII_LOG_LEVEL >= 2) ? 1000u : 10000u)
+#define WII_LIVENESS_INTERVAL_MS ((SEXY_LOG_LEVEL >= 2) ? 1000u : 10000u)
 
 // Called once, by wiigl_init, at the moment GX takes ownership of the
 // framebuffer. After this wiiLog stops writing to the text console, because that

@@ -11,58 +11,10 @@
 // fixed order that only matches the engine's packed 0xAARRGGBB on a
 // little-endian host. Both go through this header.
 #include "misc/SexyEndian.h"
+#include "misc/PlatformIoLock.h"
 
 #ifdef PS2_PLATFORM
-#include <malloc.h>
-#include "platform/ps2/Ps2IoLock.h" // printf = fio RPC; serialize with pak IO
-#include "platform/ps2/Ps2BigArena.h" // big decode buffers live in the reserved arena
-#include "SexyAppBase.h"
-// Bytes currently handed out by malloc (grows toward the ~32 MB EE ceiling).
-static long Ps2UsedHeapBytes()
-{
-	struct mallinfo mi = mallinfo();
-	return (long)mi.uordblks;
-}
-
-// Large decode buffers can fail even with free heap left (fragmentation).
-// Purge lazily-cached image bits and retry before giving up.
-static uint32_t* Ps2AllocImageBits(int theCount)
-{
-	uint32_t* aBits = new (std::nothrow) uint32_t[theCount];
-	if (aBits == NULL && Sexy::gSexyAppBase != NULL)
-	{
-		printf("[IMG] alloc %d bytes failed (used=%.2fMB), purging bits\n",
-			(int)(theCount * sizeof(uint32_t)), (double)Ps2UsedHeapBytes() / (1024.0 * 1024.0));
-		Sexy::gSexyAppBase->PurgeLazyImageBits(true);
-		aBits = new (std::nothrow) uint32_t[theCount];
-		if (aBits == NULL)
-		{
-			printf("[IMG] alloc still failing, purging textures too\n");
-			Sexy::gSexyAppBase->PurgeLazyImages();
-			aBits = new (std::nothrow) uint32_t[theCount];
-		}
-	}
-	return aBits;
-}
-
-static unsigned char* Ps2AllocImageBytes(int theCount)
-{
-	unsigned char* aBytes = new (std::nothrow) unsigned char[theCount];
-	if (aBytes == NULL && Sexy::gSexyAppBase != NULL)
-	{
-		printf("[IMG] alloc %d bytes failed (used=%.2fMB), purging bits\n",
-			theCount, (double)Ps2UsedHeapBytes() / (1024.0 * 1024.0));
-		Sexy::gSexyAppBase->PurgeLazyImageBits(true);
-		aBytes = new (std::nothrow) unsigned char[theCount];
-		if (aBytes == NULL)
-		{
-			printf("[IMG] alloc still failing, purging textures too\n");
-			Sexy::gSexyAppBase->PurgeLazyImages();
-			aBytes = new (std::nothrow) unsigned char[theCount];
-		}
-	}
-	return aBytes;
-}
+#include "platform/ps2/Ps2ImageMemory.h"
 #endif
 
 extern "C"
@@ -112,7 +64,7 @@ uint32_t* Image::GetBits()
 {
 #ifdef SEXY_COMPACT_IMAGES
 	if (mBits == NULL && ((mColorTable != NULL && mColorIndices != NULL)
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 		|| mRGBBits != NULL
 #endif
 		))
@@ -121,7 +73,7 @@ uint32_t* Image::GetBits()
 		// +1: leave the canary slot so LoadLazyImageBits can adopt this buffer
 		// instead of duplicating it (second w*h*4 contiguous block).
 #ifdef PS2_PLATFORM
-		mBits = Ps2AllocImageBits(aSize + 1);
+		mBits = Sexy::Ps2AllocImageBits(aSize + 1);
 #else
 		// Wii needs no purge-and-retry wrapper here: the operator new rescue in
 		// platform/wii/WiiHeap.cpp already purges lazy bits and retries (arena
@@ -141,7 +93,7 @@ uint32_t* Image::GetBits()
 			mColorTable = NULL;
 			mColorIndices = NULL;
 		}
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 		else if (mRGBBits != NULL)
 		{
 			unsigned char* src = mRGBBits;
@@ -321,21 +273,21 @@ Image* GetPNGImage(const std::string& theFileName)
     case PNG_COLOR_TYPE_RGB_ALPHA:  ct = "RGBA"; break;
     }
 
-    Ps2IoLockAcquire();
+    PlatformIoLockAcquire();
     printf("[PvZ PS2] PNG '%s' %ux%u type=%s depth=%d\n",
         theFileName.c_str(),
         (unsigned)width,
         (unsigned)height,
         ct,
         bit_depth);
-    Ps2IoLockRelease();
+    PlatformIoLockRelease();
 #endif
 
 #ifdef SEXY_COMPACT_IMAGES
     bool keepPalette = (color_type == PNG_COLOR_TYPE_PALETTE && bit_depth <= 8);
     bool hasTRNS = png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS) != 0;
-#ifdef PS2_PLATFORM
-    // 24-bit RGB is PS2-only: only its GS upload path expands a piece at a time.
+#ifdef SEXY_COMPACT_RGB_IMAGES
+    // 24-bit RGB is kept only when the upload backend can expand a piece at a time.
     // Elsewhere nothing can read mRGBBits, so an image kept in that form would
     // draw as nothing.
     bool keepRgb = (color_type == PNG_COLOR_TYPE_RGB && bit_depth == 8);
@@ -387,52 +339,27 @@ Image* GetPNGImage(const std::string& theFileName)
 #endif
 
 #ifdef PS2_PLATFORM
-    Ps2IoLockAcquire();
+    PlatformIoLockAcquire();
     printf("[PvZ PS2] Decoded rowbytes=%u channels=%u decode=%.2f MB heapUsed=%.2f MB\n",
         (unsigned)rowbytes,
         (unsigned)(rowbytes / width),
         (double)(rowbytes * height) / (1024.0 * 1024.0),
-        (double)Ps2UsedHeapBytes() / (1024.0 * 1024.0));
-    Ps2IoLockRelease();
+        (double)Sexy::Ps2ImageUsedHeapBytes() / (1024.0 * 1024.0));
+    PlatformIoLockRelease();
 
-    // Hard-ceiling guard: an allocation that pushes the arena past ~26MB does
-    // not fail cleanly, it takes the console down with no log (see
-    // IsHeapUnderPressure). If this decode's transient peak would cross the
-    // guard line, shed purgeable bits first; if that is not enough, refuse
-    // the decode — the caller keeps its stub/NULL path and the game lives.
+    // Keep the PS2 heap ceiling / arena policy behind the platform seam. The
+    // decoder only reports the transient bytes it is about to require.
     long aDecodePeak = (long)(rowbytes * height);
     if (keepPalette && !aDirectPalette)
         aDecodePeak += (long)width * (long)height;
-    // The big-block arena carved PS2_BIG_ARENA_BYTES out of the general
-    // heap's ceiling, so the guard line moves down with it. A big decode
-    // buffer is served from the arena (invisible to mallinfo) — when the
-    // arena has room for the whole peak, this decode puts no pressure on
-    // the general heap at all and the guard must not refuse it.
-    const long aHeapGuardLine = (25L << 20) - (long)PS2_BIG_ARENA_BYTES;
-    bool aFitsArena = aDecodePeak >= (long)PS2_BIG_ALLOC_THRESHOLD &&
-        (long)(PS2_BIG_ARENA_BYTES - Ps2BigUsedBytes()) >= aDecodePeak;
-    if (!aFitsArena &&
-        Sexy::gSexyAppBase != NULL && Ps2UsedHeapBytes() + aDecodePeak > aHeapGuardLine)
+    if (!Sexy::Ps2PrepareImageDecode(aDecodePeak))
     {
-        Sexy::gSexyAppBase->PurgeLazyImageBits(true);
-        if (Ps2UsedHeapBytes() + aDecodePeak > aHeapGuardLine)
-        {
-            // Bits alone are often not enough right after a heavy scene: the
-            // GL shim's per-texture CPU copies hold several MB that only the
-            // full purge releases (it degrades itself to bits-only when
-            // called off the main thread). Escalate before refusing — a
-            // refusal here is a black sprite until its cooldown retry.
-            Sexy::gSexyAppBase->PurgeLazyImages();
-        }
-        if (Ps2UsedHeapBytes() + aDecodePeak > aHeapGuardLine)
-        {
-            printf("[PvZ PS2] decode REFUSED '%s' (%ux%u): +%ldKB would cross the heap ceiling (used %.2fMB)\n",
-                theFileName.c_str(), (unsigned)width, (unsigned)height,
-                aDecodePeak / 1024, (double)Ps2UsedHeapBytes() / (1024.0 * 1024.0));
-            png_destroy_read_struct(&png_ptr, &info_ptr, (png_infopp)NULL);
-            p_fclose(fp);
-            return NULL;
-        }
+        printf("[PvZ PS2] decode REFUSED '%s' (%ux%u): +%ldKB would cross the heap ceiling (used %.2fMB)\n",
+            theFileName.c_str(), (unsigned)width, (unsigned)height,
+            aDecodePeak / 1024, (double)Sexy::Ps2ImageUsedHeapBytes() / (1024.0 * 1024.0));
+        png_destroy_read_struct(&png_ptr, &info_ptr, (png_infopp)NULL);
+        p_fclose(fp);
+        return NULL;
     }
 #endif
 
@@ -444,21 +371,10 @@ Image* GetPNGImage(const std::string& theFileName)
     size_t aBitsSize = rowbytes * height;
 #endif
     png_bytep* row_pointers = new (std::nothrow) png_bytep[height];
-    uint8_t* aBits = new (std::nothrow) uint8_t[aBitsSize];
-
 #ifdef PS2_PLATFORM
-    if (aBits == NULL && Sexy::gSexyAppBase != NULL)
-    {
-        Sexy::gSexyAppBase->PurgeLazyImageBits(true);
-        aBits = new (std::nothrow) uint8_t[aBitsSize];
-        if (aBits == NULL)
-        {
-            Sexy::gSexyAppBase->PurgeLazyImages();
-            aBits = new (std::nothrow) uint8_t[aBitsSize];
-        }
-    }
-    if (row_pointers == NULL && aBits != NULL)
-        row_pointers = new (std::nothrow) png_bytep[height];
+    uint8_t* aBits = Sexy::Ps2AllocImageBytes((int)aBitsSize);
+#else
+    uint8_t* aBits = new (std::nothrow) uint8_t[aBitsSize];
 #endif
 
     if (row_pointers == NULL || aBits == NULL)
@@ -576,7 +492,7 @@ Image* GetPNGImage(const std::string& theFileName)
             return NULL;
         }
     }
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
     else if (keepRgb)
     {
         anImage->mRGBBits = aBits;
@@ -665,7 +581,7 @@ Image* GetTGAImage(const std::string& theFileName)
 	anImage->mWidth = anImageWidth;
 	anImage->mHeight = anImageHeight;
 #ifdef PS2_PLATFORM
-	anImage->mBits = Ps2AllocImageBits(anImageWidth*anImageHeight);
+	anImage->mBits = Sexy::Ps2AllocImageBits(anImageWidth*anImageHeight);
 	if (anImage->mBits == NULL)
 	{
 		delete anImage;
@@ -1074,7 +990,7 @@ Image* GetGIFImage(const std::string& theFileName)
 		top_stack = pixel_stack;
 
 #ifdef PS2_PLATFORM
-		uint32_t* aBits = Ps2AllocImageBits(width * height);
+		uint32_t* aBits = Sexy::Ps2AllocImageBits(width * height);
 		if (aBits == NULL)
 		{
 			delete[] packet;
@@ -1807,7 +1723,7 @@ Image* GetJPEGImage(const std::string& theFileName)
 	printf("[JPG] sarray ok buffer=%p row0=%p\n", (void*)buffer, (void*)buffer[0]);
 	int aPixelCount = (int)(cinfo.output_width * cinfo.output_height);
 	int aRGBBytes = aPixelCount * 3;
-	unsigned char* aRGBBits = Ps2AllocImageBytes(aRGBBytes);
+	unsigned char* aRGBBits = Sexy::Ps2AllocImageBytes(aRGBBytes);
 	printf("[JPG] rgbbits ok %p (%u bytes)\n", (void*)aRGBBits, (unsigned)aRGBBytes);
 	if (aRGBBits == NULL)
 	{
@@ -1876,7 +1792,7 @@ Image* GetJPEGImage(const std::string& theFileName)
 	Image* anImage = new Image();
 	anImage->mWidth = cinfo.output_width;
 	anImage->mHeight = cinfo.output_height;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 	anImage->mRGBBits = aRGBBits;
 	anImage->mHasTrans = false;
 	anImage->mHasAlpha = false;
@@ -2053,7 +1969,7 @@ Image* ImageLib::GetImage(const std::string& theFilename, bool lookForAlphaImage
 				{
 					printf("[IMG] OOM expanding '%s' for alpha compose; alpha dropped\n", theFilename.c_str());
 				}
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_IMAGES
 				// Compact companions carry the per-pixel alpha byte already
 				// (palette entry / RGB blue channel — the same byte the
 				// expanded compose reads as *aBits2 & 0xFF). Reading it in

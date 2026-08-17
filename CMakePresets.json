@@ -20,11 +20,12 @@
     {
       "name": "ps2-release",
       "displayName": "PS2 Release",
-      "generator": "Unix Makefiles",
+      "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/ps2-release",
-      "toolchainFile": "${sourceDir}/psdevwindows/ps2sdk/ps2dev.cmake",
+      "toolchainFile": "${sourceDir}/CMake/ps2_toolchain.cmake",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_MAKE_PROGRAM": "C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
       },
       "environment": {
         "PS2DEV": "${sourceDir}/psdevwindows",

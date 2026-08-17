@@ -119,7 +119,11 @@ public:
 	virtual ~ActiveFontLayer();
 };
 
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+typedef std::vector<ActiveFontLayer> ActiveFontLayerList;
+#else
 typedef std::list<ActiveFontLayer> ActiveFontLayerList;
+#endif
 
 class RenderCommand
 {

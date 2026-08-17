@@ -1,8 +1,10 @@
 #include <gsKit.h>
 #include <gsMisc.h>
 
-#include "graphics/GLInterface.h"
+#include "graphics/Ps2GraphicsInterface.h"
 #include "graphics/GLImage.h"
+#include "graphics/Ps2GsConfig.h"
+#include "graphics/Ps2GsRenderer.h"
 #include "SexyAppBase.h"
 #include "misc/AutoCrit.h"
 #include "misc/CritSect.h"
@@ -10,16 +12,11 @@
 #include "graphics/MemoryImage.h"
 #include "widget/WidgetManager.h"
 
-#define MAX_VERTICES 16384
 #define GetColorFromTriVertex(theVertex, theColor) (theVertex.color?theVertex.color:theColor)
 
 using namespace Sexy;
 
 extern GSGLOBAL* gsGlobal;
-
-// gles_ps2.cpp: whether a texture id has usable storage; the piece audit in
-// TextureData::CreateTextures is the only caller (see the comment there).
-extern "C" int ps2_gles_tex_valid(GLuint id);
 
 static int gMinTextureWidth;
 static int gMinTextureHeight;
@@ -27,14 +24,10 @@ static int gMaxTextureWidth;
 static int gMaxTextureHeight;
 static int gSupportedPixelFormats;
 static bool gTextureSizeMustBePow2;
-static int MAX_TEXTURE_SIZE = 1024;
+static int MAX_TEXTURE_SIZE = PS2_GS_MAX_TEXTURE_SIZE;
 static bool gLinearFilter = false;
 
-// Texture-piece upload scratch. The shim caps pieces at 512x512 and uploads
-// are serialized under mCritSect, so one static buffer replaces the 1-4MB
-// heap allocation per piece; on a fragmented EE heap that allocation could
-// fail, and operator new aborting is a silent hard freeze.
-#define PIECE_SCRATCH_PIXELS (512*512)
+#define PIECE_SCRATCH_PIXELS (PS2_GS_MAX_TEXTURE_SIZE*PS2_GS_MAX_TEXTURE_SIZE)
 static union
 {
 	uint32_t u32[PIECE_SCRATCH_PIXELS];
@@ -42,102 +35,33 @@ static union
 	uint8_t u8[PIECE_SCRATCH_PIXELS];
 } gPieceScratch;
 
-static GLVertex* gVertices;
-static int gNumVertices;
-static GLenum gVertexMode;
-
-static void GfxBegin(GLenum vertexMode)
+static void DrawVertexTriangle(Ps2GsTexture* texture, const Ps2Vertex& a, const Ps2Vertex& b, const Ps2Vertex& c)
 {
-	if (gVertexMode != (GLenum)-1) return;
-	gVertexMode = vertexMode;
-}
-
-static void GfxEnd()
-{
-	if (gVertexMode == (GLenum)-1) return;
-
-	glVertexPointer(3, GL_FLOAT, sizeof(GLVertex), (char*)gVertices);
-	glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(GLVertex), (char*)gVertices + sizeof(float)*3);
-	glTexCoordPointer(2, GL_FLOAT, sizeof(GLVertex), (char*)gVertices + sizeof(float)*3 + sizeof(uint32_t));
-	glEnableClientState(GL_VERTEX_ARRAY);
-	glEnableClientState(GL_COLOR_ARRAY);
-	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-
-	glDrawArrays(gVertexMode, 0, gNumVertices);
-
-	gVertexMode = (GLenum)-1;
-	gNumVertices = 0;
-}
-
-static void GfxAddVertices(const GLVertex *arr, int arrCount)
-{
-	if (gVertexMode == (GLenum)-1) return;
-
-	if (gNumVertices + arrCount >= MAX_VERTICES)
+	if (texture)
 	{
-		GLenum oldMode = gVertexMode;
-		GfxEnd();
-		GfxBegin(oldMode);
+		Ps2GsRendererDrawTexturedTriangle(texture,
+			a.sx, a.sy, a.tu, a.tv, a.color,
+			b.sx, b.sy, b.tu, b.tv, b.color,
+			c.sx, c.sy, c.tu, c.tv, c.color);
 	}
-	
-	for (int i=0; i<arrCount; i++)
+	else
 	{
-		gVertices[gNumVertices + i] = arr[i];
-	}
-	gNumVertices += arrCount;
-}
-
-static void GfxAddVertices(VertexList &arr)
-{
-	if (gVertexMode == (GLenum)-1) return;
-
-	if (gNumVertices + arr.size() >= MAX_VERTICES)
-	{
-		GLenum oldMode = gVertexMode;
-		GfxEnd();
-		GfxBegin(oldMode);
-	}
-
-	for (int i=0; i<arr.size(); i++)
-	{
-		gVertices[gNumVertices + i] = arr[i];
-	}
-	gNumVertices += arr.size();
-}
-
-static void GfxAddVertices(const TriVertex arr[][3], int arrCount, unsigned int theColor, float tx, float ty, float aMaxTotalU, float aMaxTotalV)
-{
-	if (gVertexMode == (GLenum)-1) return;
-
-	if (gNumVertices + arrCount*3 >= MAX_VERTICES)
-	{
-		GLenum oldMode = gVertexMode;
-		GfxEnd();
-		GfxBegin(oldMode);
-	}
-
-	for (int aTriangleNum=0; aTriangleNum < arrCount; aTriangleNum++)
-	{
-		TriVertex* aTriVerts = (TriVertex*) arr[aTriangleNum];
-
-		for (int i = 0; i < 3; i++)
-		{
-			gVertices[gNumVertices+i].sx = aTriVerts[i].x + tx;
-			gVertices[gNumVertices+i].sy = aTriVerts[i].y + ty;
-			gVertices[gNumVertices+i].color = GetColorFromTriVertex(aTriVerts[i], theColor);
-			gVertices[gNumVertices+i].tu = aTriVerts[i].u * aMaxTotalU;
-			gVertices[gNumVertices+i].tv = aTriVerts[i].v * aMaxTotalV;
-		}
-
-		gNumVertices += 3;
+		Ps2GsRendererDrawTriangle(a.sx, a.sy, a.color, b.sx, b.sy, b.color, c.sx, c.sy, c.color);
 	}
 }
 
+static void DrawVertexFan(const VertexList& vertices, Ps2GsTexture* texture)
+{
+	if (vertices.mSize < 3)
+		return;
+	for (int i = 1; i + 1 < vertices.mSize; ++i)
+		DrawVertexTriangle(texture, vertices.mVerts[0], vertices.mVerts[i], vertices.mVerts[i + 1]);
+}
 
-static void CopyImageToTexture8888(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
+static bool CopyImageToTexture8888(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, Ps2GsTexture* texture)
 {
 	if (theDestPitch * theDestHeight > PIECE_SCRATCH_PIXELS)
-		return;
+		return false;
 	uint32_t *aDest = gPieceScratch.u32;
 
 #ifdef PS2_PLATFORM
@@ -159,7 +83,11 @@ static void CopyImageToTexture8888(MemoryImage *theImage, int offx, int offy, in
 			}
 
 			if (rightPad)
-				*dst = *(dst-1);
+			{
+				const uint32_t edge = *(dst - 1);
+				while (dst < dstRow + theDestPitch)
+					*dst++ = edge;
+			}
 
 			srcRow += theImage->GetWidth() * 3;
 			dstRow += theDestPitch;
@@ -171,7 +99,7 @@ static void CopyImageToTexture8888(MemoryImage *theImage, int offx, int offy, in
 	{
 		uint32_t *aSrcBits = (uint32_t*)theImage->GetBits();
 		if (aSrcBits == NULL)
-			return; // OOM during lazy expand; skip the piece instead of crashing
+			return false; // OOM during lazy expand; skip the piece instead of crashing
 		uint32_t *srcRow = aSrcBits + offy * theImage->GetWidth() + offx;
 		uint32_t *dstRow = aDest;
 
@@ -183,7 +111,11 @@ static void CopyImageToTexture8888(MemoryImage *theImage, int offx, int offy, in
 				*dst++ = *src++;
 
 			if (rightPad)
-				*dst = *(dst-1);
+			{
+				const uint32_t edge = *(dst - 1);
+				while (dst < dstRow + theDestPitch)
+					*dst++ = edge;
+			}
 
 			srcRow += theImage->GetWidth();
 			dstRow += theDestPitch;
@@ -203,7 +135,11 @@ static void CopyImageToTexture8888(MemoryImage *theImage, int offx, int offy, in
 				*dst++ = palette[*src++];
 
 			if (rightPad)
-				*dst = *(dst-1);
+			{
+				const uint32_t edge = *(dst - 1);
+				while (dst < dstRow + theDestPitch)
+					*dst++ = edge;
+			}
 
 			srcRow += theImage->GetWidth();
 			dstRow += theDestPitch;
@@ -212,29 +148,26 @@ static void CopyImageToTexture8888(MemoryImage *theImage, int offx, int offy, in
 
 	if (bottomPad)
 	{
-		uint32_t *dstrow = aDest + (theDestPitch*theHeight);
-		memcpy(dstrow, dstrow-(theDestPitch*4), (theDestPitch*4));
+		for (int y = theHeight; y < theDestHeight; ++y)
+			memcpy(aDest + y * theDestPitch, aDest + (theHeight - 1) * theDestPitch,
+				theDestPitch * sizeof(uint32_t));
 	}
 
-	// aDest holds the WHOLE texture piece; offx/offy are offsets into the
-	// source image, not into the texture, so the sub-update rect is (0,0).
-	if (create)
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, theDestPitch, theDestHeight, 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, aDest);
-	else
-		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, theDestPitch, theDestHeight, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, aDest);
+	return Ps2GsTextureSetPixels(texture, aDest, theDestPitch, theDestHeight,
+		theDestPitch * (int)sizeof(uint32_t), PS2_SRC_BGRA8888);
 }
 
-static void CopyImageToTexture4444(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
+static bool CopyImageToTexture4444(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, Ps2GsTexture* texture)
 {
 	if (theDestPitch * theDestHeight > PIECE_SCRATCH_PIXELS)
-		return;
+		return false;
 	uint16_t *aDest = gPieceScratch.u16;
 
 	if (theImage->mColorTable == NULL)
 	{
 		uint32_t *aSrcBits = (uint32_t*)theImage->GetBits();
 		if (aSrcBits == NULL)
-			return; // OOM during lazy expand; skip the piece instead of crashing
+			return false; // OOM during lazy expand; skip the piece instead of crashing
 		uint32_t *srcRow = aSrcBits + offy * theImage->GetWidth() + offx;
 		uint16_t *dstRow = aDest;
 
@@ -249,7 +182,11 @@ static void CopyImageToTexture4444(MemoryImage *theImage, int offx, int offy, in
 			}
 
 			if (rightPad)
-				*dst = *(dst-1);
+			{
+				const uint16_t edge = *(dst - 1);
+				while (dst < dstRow + theDestPitch)
+					*dst++ = edge;
+			}
 
 			srcRow += theImage->GetWidth();
 			dstRow += theDestPitch;
@@ -272,7 +209,11 @@ static void CopyImageToTexture4444(MemoryImage *theImage, int offx, int offy, in
 			}
 
 			if (rightPad)
-				*dst = *(dst-1);
+			{
+				const uint16_t edge = *(dst - 1);
+				while (dst < dstRow + theDestPitch)
+					*dst++ = edge;
+			}
 
 			srcRow += theImage->GetWidth();
 			dstRow += theDestPitch;
@@ -281,27 +222,26 @@ static void CopyImageToTexture4444(MemoryImage *theImage, int offx, int offy, in
 
 	if (bottomPad)
 	{
-		uint16_t *dstrow = aDest + (theDestPitch*theHeight);
-		memcpy(dstrow, dstrow-(theDestPitch*2), (theDestPitch*2));
+		for (int y = theHeight; y < theDestHeight; ++y)
+			memcpy(aDest + y * theDestPitch, aDest + (theHeight - 1) * theDestPitch,
+				theDestPitch * sizeof(uint16_t));
 	}
 
-	if (create)
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, theDestPitch, theDestHeight, 0, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, aDest);
-	else
-		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, theDestPitch, theDestHeight, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, aDest);
+	return Ps2GsTextureSetPixels(texture, aDest, theDestPitch, theDestHeight,
+		theDestPitch * (int)sizeof(uint16_t), PS2_SRC_BGRA4444_REV);
 }
 
-static void CopyImageToTexture565(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
+static bool CopyImageToTexture565(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, Ps2GsTexture* texture)
 {
 	if (theDestPitch * theDestHeight > PIECE_SCRATCH_PIXELS)
-		return;
+		return false;
 	uint16_t *aDest = gPieceScratch.u16;
 
 	if (theImage->mColorTable == NULL)
 	{
 		uint32_t *aSrcBits = (uint32_t*)theImage->GetBits();
 		if (aSrcBits == NULL)
-			return; // OOM during lazy expand; skip the piece instead of crashing
+			return false; // OOM during lazy expand; skip the piece instead of crashing
 		uint32_t *srcRow = aSrcBits + offy * theImage->GetWidth() + offx;
 		uint16_t *dstRow = aDest;
 
@@ -316,7 +256,11 @@ static void CopyImageToTexture565(MemoryImage *theImage, int offx, int offy, int
 			}
 
 			if (rightPad)
-				*dst = *(dst-1);
+			{
+				const uint16_t edge = *(dst - 1);
+				while (dst < dstRow + theDestPitch)
+					*dst++ = edge;
+			}
 
 			srcRow += theImage->GetWidth();
 			dstRow += theDestPitch;
@@ -339,7 +283,11 @@ static void CopyImageToTexture565(MemoryImage *theImage, int offx, int offy, int
 			}
 
 			if (rightPad)
-				*dst = *(dst-1);
+			{
+				const uint16_t edge = *(dst - 1);
+				while (dst < dstRow + theDestPitch)
+					*dst++ = edge;
+			}
 
 			srcRow += theImage->GetWidth();
 			dstRow += theDestPitch;
@@ -348,20 +296,19 @@ static void CopyImageToTexture565(MemoryImage *theImage, int offx, int offy, int
 
 	if (bottomPad)
 	{
-		uint16_t *dstrow = aDest + (theDestPitch*theHeight);
-		memcpy(dstrow, dstrow-(theDestPitch*2), (theDestPitch*2));
+		for (int y = theHeight; y < theDestHeight; ++y)
+			memcpy(aDest + y * theDestPitch, aDest + (theHeight - 1) * theDestPitch,
+				theDestPitch * sizeof(uint16_t));
 	}
 
-	if (create)
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, theDestPitch, theDestHeight, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, aDest);
-	else
-		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, theDestPitch, theDestHeight, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, aDest);
+	return Ps2GsTextureSetPixels(texture, aDest, theDestPitch, theDestHeight,
+		theDestPitch * (int)sizeof(uint16_t), PS2_SRC_RGB565);
 }
 
-static void CopyImageToTexturePalette8(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
+static bool CopyImageToTexturePalette8(MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, Ps2GsTexture* texture)
 {
 	if (theImage->mColorIndices == NULL || theImage->mColorTable == NULL)
-		return;
+		return false;
 
 	uint8_t *src = (uint8_t*)theImage->mColorIndices + offy * theImage->GetWidth() + offx;
 	uint8_t *uploadIndices = src;
@@ -371,7 +318,7 @@ static void CopyImageToTexturePalette8(MemoryImage *theImage, int offx, int offy
 	if (rightPad || bottomPad || theWidth != theDestPitch || theHeight != theDestHeight)
 	{
 		if (theDestPitch * theDestHeight > PIECE_SCRATCH_PIXELS)
-			return;
+			return false;
 		padded = gPieceScratch.u8;
 
 		for (int y = 0; y < theHeight; y++)
@@ -391,23 +338,14 @@ static void CopyImageToTexturePalette8(MemoryImage *theImage, int offx, int offy
 		uploadPitch = theDestPitch;
 	}
 
-	if (create)
-		ps2_gles_tex_image_indexed(theDestPitch, theDestHeight, uploadIndices, uploadPitch,
-			reinterpret_cast<const GLuint*>(theImage->mColorTable), 256);
-	else
-		ps2_gles_tex_sub_image_indexed(0, 0, theDestPitch, theDestHeight, uploadIndices, uploadPitch,
-			reinterpret_cast<const GLuint*>(theImage->mColorTable), 256);
+	return Ps2GsTextureSetIndexed(texture, uploadIndices, theDestPitch, theDestHeight, uploadPitch,
+		reinterpret_cast<const uint32_t*>(theImage->mColorTable), 256);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
-static void CopyImageToTexture(MemoryImage *theImage, int offx, int offy, int texWidth, int texHeight, PixelFormat theFormat, bool create)
+static bool CopyImageToTexture(MemoryImage *theImage, int offx, int offy, int texWidth, int texHeight, PixelFormat theFormat, Ps2GsTexture* texture)
 {
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (gLinearFilter) ? GL_LINEAR : GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (gLinearFilter) ? GL_LINEAR : GL_NEAREST);
-
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
 	int aWidth = std::min(texWidth,(theImage->GetWidth()-offx));
 	int aHeight = std::min(texHeight,(theImage->GetHeight()-offy));
@@ -415,17 +353,18 @@ static void CopyImageToTexture(MemoryImage *theImage, int offx, int offy, int te
 	bool rightPad = aWidth<texWidth;
 	bool bottomPad = aHeight<texHeight;
 
-	if(aWidth>0 && aHeight>0)
+	if(aWidth<=0 || aHeight<=0)
+		return false;
+
+	switch (theFormat)
 	{
-		switch (theFormat)
-		{
-			case PixelFormat_A8R8G8B8:	CopyImageToTexture8888(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create); break;
-			case PixelFormat_A4R4G4B4:	CopyImageToTexture4444(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create); break;
-			case PixelFormat_R5G6B5:	CopyImageToTexture565(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create); break;
-			case PixelFormat_Palette8:	CopyImageToTexturePalette8(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create); break;
-			case PixelFormat_Unknown: break;
-		}
+		case PixelFormat_A8R8G8B8:	return CopyImageToTexture8888(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, texture);
+		case PixelFormat_A4R4G4B4:	return CopyImageToTexture4444(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, texture);
+		case PixelFormat_R5G6B5:	return CopyImageToTexture565(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, texture);
+		case PixelFormat_Palette8:	return CopyImageToTexturePalette8(theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, texture);
+		case PixelFormat_Unknown: break;
 	}
+	return false;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -551,13 +490,9 @@ TextureData::~TextureData()
 void TextureData::ReleaseTextures()
 {
 	for(int i=0; i<(int)mTextures.size(); i++)
-	{
-		GLuint* aSurface = &mTextures[i].mTexture;
-		glDeleteTextures(1, aSurface);
-	}
+		Ps2GsTextureRelease(&mTextures[i].mTexture);
 
 	mTextures.clear();
-
 	mTexMemSize = 0;
 
 	/*
@@ -613,7 +548,7 @@ void TextureData::CreateTextureDimensions(MemoryImage *theImage)
 	for (i = 0; i < mTextures.size(); i++)
 	{
 		TextureDataPiece& aPiece = mTextures[i];
-		aPiece.mTexture = 0;
+		Ps2GsTextureInit(&aPiece.mTexture);
 		aPiece.mWidth = mTexPieceWidth;
 		aPiece.mHeight = mTexPieceHeight;
 	}
@@ -637,6 +572,13 @@ void TextureData::CreateTextureDimensions(MemoryImage *theImage)
 	// Assign corner piece
 	mTextures.back().mWidth = aCornerWidth;
 	mTextures.back().mHeight = aCornerHeight;
+
+	for (i = 0; i < mTextures.size(); i++)
+	{
+		TextureDataPiece& aPiece = mTextures[i];
+		aPiece.mInvWidth = 1.0f / aPiece.mWidth;
+		aPiece.mInvHeight = 1.0f / aPiece.mHeight;
+	}
 	/**/
 
 	mMaxTotalU = aWidth / (float)mTexPieceWidth;
@@ -693,7 +635,6 @@ void TextureData::CreateTextures(MemoryImage *theImage)
 		aFormat = PixelFormat_A4R4G4B4;
 
 	// Release texture if image size has changed
-	bool createTextures = false;
 	if (mWidth!=theImage->mWidth || mHeight!=theImage->mHeight || aFormat!=mPixelFormat || theImage->mD3DFlags!=mImageFlags)
 	{
 		ReleaseTextures();
@@ -701,7 +642,6 @@ void TextureData::CreateTextures(MemoryImage *theImage)
 		mPixelFormat = aFormat;
 		mImageFlags = theImage->mD3DFlags;
 		CreateTextureDimensions(theImage);
-		createTextures = true;
 	}
 
 	int i,x,y;
@@ -709,65 +649,35 @@ void TextureData::CreateTextures(MemoryImage *theImage)
 	int aHeight = theImage->GetHeight();
 	int aWidth = theImage->GetWidth();
 
-	int aFormatSize = 4;
-	if (aFormat==PixelFormat_R5G6B5)
-		aFormatSize = 2;
-	else if (aFormat==PixelFormat_A4R4G4B4)
-		aFormatSize = 2;
-	else if (aFormat==PixelFormat_Palette8)
-		aFormatSize = 1;
-
+	mTexMemSize = 0;
 	i=0;
 	for(y=0; y<aHeight; y+=mTexPieceHeight)
 	{
 		for(x=0; x<aWidth; x+=mTexPieceWidth, i++)
 		{
 			TextureDataPiece &aPiece = mTextures[i];
-			if (createTextures)
+			if (!CopyImageToTexture(theImage, x, y, aPiece.mWidth, aPiece.mHeight, aFormat, &aPiece.mTexture))
 			{
-				glGenTextures(1, &aPiece.mTexture);
-				mTexMemSize += aPiece.mWidth*aPiece.mHeight*aFormatSize;
-				if (aFormat == PixelFormat_Palette8)
-					mTexMemSize += 256 * 4;
+				static int sInvalidLogs = 0;
+				if (sInvalidLogs < 16)
+				{
+					++sInvalidLogs;
+					printf("[PS2] native texture piece %d/%d failed for '%s' (%dx%d) - retry in 64 draws\n",
+						i, (int)mTextures.size(),
+						theImage->mFilePath.empty() ? "(runtime)" : theImage->mFilePath.c_str(),
+						theImage->mWidth, theImage->mHeight);
+				}
+				ReleaseTextures();
+				mPixelFormat = PixelFormat_Unknown;
+				mCreateFailCooldown = 64;
+				return;
 			}
-			glBindTexture(GL_TEXTURE_2D, aPiece.mTexture);
-
-			CopyImageToTexture(theImage,x,y,aPiece.mWidth,aPiece.mHeight,aFormat, createTextures);
+			Ps2GsTextureSetLinearFilter(&aPiece.mTexture, gLinearFilter);
+			mTexMemSize += aPiece.mTexture.mGs.Width * aPiece.mTexture.mGs.Height + 256 * 4;
 		}
 	}
 
-#ifdef PS2_PLATFORM
-	// Audit the pieces before sealing. The shim's glTexImage2D is void, so a
-	// piece whose creation failed inside it (palettize OOM, CLUT/index alloc)
-	// is only visible here. Sealing over a dead piece made the sprite black
-	// forever: its draws skip (CreateImageTexture returns false on Unknown),
-	// nothing marks the image changed, and CheckCreateTextures never rebuilds
-	// — the post-credits "menu with black holes". Tear down instead and leave
-	// the format Unknown so the cooldown retry rebuilds once the memory
-	// pressure that killed the allocation has passed.
-	for (i = 0; i < (int)mTextures.size(); i++)
-	{
-		if (!ps2_gles_tex_valid(mTextures[i].mTexture))
-		{
-			static int sInvalidLogs = 0;
-			if (sInvalidLogs < 16)
-			{
-				++sInvalidLogs;
-				printf("[PS2] texture piece %d/%d failed for '%s' (%dx%d) — retry in 64 draws\n",
-					i, (int)mTextures.size(),
-					theImage->mFilePath.empty() ? "(runtime)" : theImage->mFilePath.c_str(),
-					theImage->mWidth, theImage->mHeight);
-			}
-			ReleaseTextures();
-			mPixelFormat = PixelFormat_Unknown;
-			mCreateFailCooldown = 64;
-			// Keep the image's CPU bits (skip the lazy purge below): the
-			// retry can then rebuild without re-decoding, and the pressure
-			// valve can still purge them like any other clean lazy image.
-			return;
-		}
-	}
-#endif
+
 
 	mWidth = theImage->mWidth;
 	mHeight = theImage->mHeight;
@@ -775,8 +685,8 @@ void TextureData::CreateTextures(MemoryImage *theImage)
 	mPixelFormat = aFormat;
 
 #ifdef SEXY_LAZY_IMAGES
-	// The GL shim keeps its own CPU copy of every uploaded texture (for VRAM
-	// rewind re-uploads), so file-backed bits are now redundant in EE RAM.
+	// The native PS2 texture backend keeps its own CPU copy for VRAM eviction
+	// re-uploads, so file-backed bits are now redundant in EE RAM.
 	// Keep the texture; software blits re-decode the bits from the pak.
 	gSexyAppBase->PurgeLazyImage(theImage, true);
 #endif
@@ -805,12 +715,33 @@ void TextureData::CheckCreateTextures(MemoryImage *theImage)
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
-GLuint& TextureData::GetTexture(int x, int y, int &width, int &height, float &u1, float &v1, float &u2, float &v2)
+Ps2GsTexture* TextureData::GetTexture(int x, int y, int &width, int &height, float &u1, float &v1, float &u2, float &v2)
 {
+	if (x < 0 || y < 0 || width <= 0 || height <= 0 ||
+		mTexPieceWidth <= 0 || mTexPieceHeight <= 0 ||
+		mTexVecWidth <= 0 || mTexVecHeight <= 0 || mTextures.empty())
+	{
+		width = 0;
+		height = 0;
+		return NULL;
+	}
+
 	int tx = x/mTexPieceWidth;
 	int ty = y/mTexPieceHeight;
+	if (tx < 0 || ty < 0 || tx >= mTexVecWidth || ty >= mTexVecHeight)
+	{
+		width = 0;
+		height = 0;
+		return NULL;
+	}
 
 	TextureDataPiece &aPiece = mTextures[ty*mTexVecWidth + tx];
+	if (aPiece.mWidth <= 0 || aPiece.mHeight <= 0)
+	{
+		width = 0;
+		height = 0;
+		return NULL;
+	}
 
 	int left = x%mTexPieceWidth;
 	int top = y%mTexPieceHeight;
@@ -825,23 +756,46 @@ GLuint& TextureData::GetTexture(int x, int y, int &width, int &height, float &u1
 
 	width = right-left;
 	height = bottom-top;
+	if (width <= 0 || height <= 0)
+		return NULL;
 
-	u1 = (float)left/aPiece.mWidth;
-	v1 = (float)top/aPiece.mHeight;
-	u2 = (float)right/aPiece.mWidth;
-	v2 = (float)bottom/aPiece.mHeight;
+	u1 = left * aPiece.mInvWidth;
+	v1 = top * aPiece.mInvHeight;
+	u2 = right * aPiece.mInvWidth;
+	v2 = bottom * aPiece.mInvHeight;
 
-	return aPiece.mTexture;
+	return &aPiece.mTexture;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
-GLuint& TextureData::GetTextureF(float x, float y, float &width, float &height, float &u1, float &v1, float &u2, float &v2)
+Ps2GsTexture* TextureData::GetTextureF(float x, float y, float &width, float &height, float &u1, float &v1, float &u2, float &v2)
 {
-	int tx = x/mTexPieceWidth;
-	int ty = y/mTexPieceHeight;
+	if (x < 0.0f || y < 0.0f || width <= 0.0f || height <= 0.0f ||
+		mTexPieceWidth <= 0 || mTexPieceHeight <= 0 ||
+		mTexVecWidth <= 0 || mTexVecHeight <= 0 || mTextures.empty())
+	{
+		width = 0.0f;
+		height = 0.0f;
+		return NULL;
+	}
+
+	int tx = (int)(x/mTexPieceWidth);
+	int ty = (int)(y/mTexPieceHeight);
+	if (tx < 0 || ty < 0 || tx >= mTexVecWidth || ty >= mTexVecHeight)
+	{
+		width = 0.0f;
+		height = 0.0f;
+		return NULL;
+	}
 
 	TextureDataPiece &aPiece = mTextures[ty*mTexVecWidth + tx];
+	if (aPiece.mWidth <= 0 || aPiece.mHeight <= 0)
+	{
+		width = 0.0f;
+		height = 0.0f;
+		return NULL;
+	}
 
 	float left = x - tx*mTexPieceWidth;
 	float top = y - ty*mTexPieceHeight;
@@ -856,28 +810,27 @@ GLuint& TextureData::GetTextureF(float x, float y, float &width, float &height, 
 
 	width = right-left;
 	height = bottom-top;
+	if (width <= 0.0f || height <= 0.0f)
+		return NULL;
 
-	u1 = (float)left/aPiece.mWidth;
-	v1 = (float)top/aPiece.mHeight;
-	u2 = (float)right/aPiece.mWidth;
-	v2 = (float)bottom/aPiece.mHeight;
+	u1 = left * aPiece.mInvWidth;
+	v1 = top * aPiece.mInvHeight;
+	u2 = right * aPiece.mInvWidth;
+	v2 = bottom * aPiece.mInvHeight;
 
-	return aPiece.mTexture;
+	return &aPiece.mTexture;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 static void SetLinearFilter(bool linear)
 {
-	if (gLinearFilter != linear)
-	{
-		int aFilter = (linear) ? GL_LINEAR : GL_NEAREST;
+	gLinearFilter = linear;
+}
 
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, aFilter);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, aFilter);
-
-		gLinearFilter = linear;
-	}
+static void PrepareTextureForDraw(Ps2GsTexture& texture)
+{
+	Ps2GsTextureSetLinearFilter(&texture, gLinearFilter);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -901,8 +854,6 @@ void TextureData::Blt(float theX, float theY, const Rect& theSrcRect, const Colo
 	if ((srcLeft >= srcRight) || (srcTop >= srcBottom))
 		return;
 
-	glEnable(GL_TEXTURE_2D);
-
 	while(srcY < srcBottom)
 	{
 		srcX = srcLeft;
@@ -911,20 +862,20 @@ void TextureData::Blt(float theX, float theY, const Rect& theSrcRect, const Colo
 		{
 			aWidth = srcRight-srcX;
 			aHeight = srcBottom-srcY;
-			GLuint& aTexture = GetTexture(srcX, srcY, aWidth, aHeight, u1, v1, u2, v2);
+			Ps2GsTexture* aTexture = GetTexture(srcX, srcY, aWidth, aHeight, u1, v1, u2, v2);
 
 			// GetTexture can return width/height <= 0 when the source rect falls
 			// outside the (possibly IMG_DOWNSCALE-shrunk) texture piece grid, e.g.
 			// sprite-sheet sub-rects addressed in un-scaled coordinates. srcX/srcY
 			// would then never advance -> infinite loop (hard hang). Skip this blt.
-			if (aWidth <= 0 || aHeight <= 0)
+			if (aTexture == NULL || aWidth <= 0 || aHeight <= 0)
 				return;
 
 #if 0
 			float x = dstX*IMG_DOWNSCALE - 0.5f;
 			float y = dstY*IMG_DOWNSCALE - 0.5f;
 
-			GLVertex aVertex[4] = {
+			Ps2Vertex aVertex[4] = {
 				{ {x},                        {y},                       {0},{aColor},{u1},{v1} },
 				{ {x},                        {y+aHeight*IMG_DOWNSCALE}, {0},{aColor},{u1},{v2} },
 				{ {x+aWidth*IMG_DOWNSCALE},   {y},                       {0},{aColor},{u2},{v1} },
@@ -934,18 +885,17 @@ void TextureData::Blt(float theX, float theY, const Rect& theSrcRect, const Colo
 			float x = dstX - 0.5f;
 			float y = dstY - 0.5f;
 
-			GLVertex aVertex[4] = {
+			Ps2Vertex aVertex[4] = {
 				{ {x},          {y},         {0},{aColor},{u1},{v1} },
 				{ {x},          {y+aHeight}, {0},{aColor},{u1},{v2} },
 				{ {x+aWidth},   {y},         {0},{aColor},{u2},{v1} },
 				{ {x+aWidth},   {y+aHeight}, {0},{aColor},{u2},{v2} }
 			};
 #endif
-			glBindTexture(GL_TEXTURE_2D, aTexture);
-
-			GfxBegin(GL_TRIANGLE_STRIP);
-			GfxAddVertices(aVertex, 4);
-			GfxEnd();
+			PrepareTextureForDraw(*aTexture);
+			Ps2GsRendererDrawTexturedSprite(aTexture,
+				aVertex[0].sx, aVertex[0].sy, aVertex[0].tu, aVertex[0].tv,
+				aVertex[3].sx, aVertex[3].sy, aVertex[3].tu, aVertex[3].tv, aColor);
 
 			srcX += aWidth;
 			dstX += aWidth;
@@ -956,7 +906,7 @@ void TextureData::Blt(float theX, float theY, const Rect& theSrcRect, const Colo
 	}
 }
 
-static inline float GetCoord(const GLVertex& theVertex, int theCoord)
+static inline float GetCoord(const Ps2Vertex& theVertex, int theCoord)
 {
 	switch (theCoord)
 	{
@@ -969,9 +919,9 @@ static inline float GetCoord(const GLVertex& theVertex, int theCoord)
 	}
 }
 
-static inline GLVertex Interpolate(const GLVertex &v1, const GLVertex &v2, float t)
+static inline Ps2Vertex Interpolate(const Ps2Vertex &v1, const Ps2Vertex &v2, float t)
 {
-	GLVertex aVertex = v1;
+	Ps2Vertex aVertex = v1;
 	aVertex.sx = v1.sx + t*(v2.sx-v1.sx);
 	aVertex.sy = v1.sy + t*(v2.sy-v1.sy);
 	aVertex.tu = v1.tu + t*(v2.tu-v1.tu);
@@ -993,7 +943,7 @@ struct PointClipper
 {
 	Pred mPred;
 
-	void ClipPoint(int n, float clipVal, const GLVertex& v1, const GLVertex& v2, VertexList& out)
+	void ClipPoint(int n, float clipVal, const Ps2Vertex& v1, const Ps2Vertex& v2, VertexList& out)
 	{
 		if (!mPred(GetCoord(v1, n), clipVal))
 		{
@@ -1030,7 +980,7 @@ struct PointClipper
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
-static void DrawPolyClipped(const Rect *theClipRect, const VertexList &theList)
+static void DrawPolyClipped(const Rect *theClipRect, const VertexList &theList, Ps2GsTexture* texture)
 {
 	VertexList l1, l2;
 	l1 = theList;
@@ -1052,11 +1002,7 @@ static void DrawPolyClipped(const Rect *theClipRect, const VertexList &theList)
 	VertexList &aList = *out;
 
 	if (aList.size() >= 3)
-	{
-		GfxBegin(GL_TRIANGLE_FAN);
-		GfxAddVertices(aList);
-		GfxEnd();
-	}
+		DrawVertexFan(aList, texture);
 }
 
 
@@ -1111,8 +1057,6 @@ void TextureData::BltTransformed(const SexyMatrix3 &theTrans, const Rect& theSrc
 	if ((srcLeft >= srcRight) || (srcTop >= srcBottom))
 		return;
 
-	glEnable(GL_TEXTURE_2D);
-
 	while(srcY < srcBottom)
 	{
 		srcX = srcLeft;
@@ -1121,9 +1065,9 @@ void TextureData::BltTransformed(const SexyMatrix3 &theTrans, const Rect& theSrc
 		{
 			aWidth = srcRight-srcX;
 			aHeight = srcBottom-srcY;
-			GLuint& aTexture = GetTexture(srcX, srcY, aWidth, aHeight, u1, v1, u2, v2);
+			Ps2GsTexture* aTexture = GetTexture(srcX, srcY, aWidth, aHeight, u1, v1, u2, v2);
 
-			if (aWidth <= 0 || aHeight <= 0)
+			if (aTexture == NULL || aWidth <= 0 || aHeight <= 0)
 				return;
 
 #if 0
@@ -1166,20 +1110,19 @@ void TextureData::BltTransformed(const SexyMatrix3 &theTrans, const Rect& theSrc
 				}
 			}
 
-			GLVertex aVertex[4] = {
+			Ps2Vertex aVertex[4] = {
 				{ {tp[0].x},{tp[0].y},{0},{aColor},{u1},{v1} },
 				{ {tp[1].x},{tp[1].y},{0},{aColor},{u1},{v2} },
 				{ {tp[2].x},{tp[2].y},{0},{aColor},{u2},{v1} },
 				{ {tp[3].x},{tp[3].y},{0},{aColor},{u2},{v2} }
 			};
 
-			glBindTexture(GL_TEXTURE_2D, aTexture);
+			PrepareTextureForDraw(*aTexture);
 
 			if (!clipped)
 			{
-				GfxBegin(GL_TRIANGLE_STRIP);
-				GfxAddVertices(aVertex, 4);
-				GfxEnd();
+				DrawVertexTriangle(aTexture, aVertex[0], aVertex[1], aVertex[2]);
+				DrawVertexTriangle(aTexture, aVertex[2], aVertex[1], aVertex[3]);
 			}
 			else
 			{
@@ -1189,7 +1132,7 @@ void TextureData::BltTransformed(const SexyMatrix3 &theTrans, const Rect& theSrc
 				aList.push_back(aVertex[3]);
 				aList.push_back(aVertex[2]);
 
-				DrawPolyClipped(theClipRect, aList);
+				DrawPolyClipped(theClipRect, aList, aTexture);
 			}
 
 			srcX += aWidth;
@@ -1205,12 +1148,23 @@ void TextureData::BltTriangles(const TriVertex theVertices[][3], int theNumTrian
 {
 	if ((mMaxTotalU <= 1.0) && (mMaxTotalV <= 1.0))
 	{
-		glEnable(GL_TEXTURE_2D);
-		glBindTexture(GL_TEXTURE_2D, mTextures[0].mTexture);
-
-		GfxBegin(GL_TRIANGLES);
-		GfxAddVertices(theVertices, theNumTriangles, theColor, tx, ty, mMaxTotalU, mMaxTotalV);
-		GfxEnd();
+		Ps2GsTexture& texture = mTextures[0].mTexture;
+		PrepareTextureForDraw(texture);
+		for (int triangle = 0; triangle < theNumTriangles; ++triangle)
+		{
+			const TriVertex* vertices = theVertices[triangle];
+			Ps2Vertex nativeVertices[3];
+			for (int i = 0; i < 3; ++i)
+			{
+				nativeVertices[i].sx = vertices[i].x + tx;
+				nativeVertices[i].sy = vertices[i].y + ty;
+				nativeVertices[i].sz = 0;
+				nativeVertices[i].color = GetColorFromTriVertex(vertices[i], theColor);
+				nativeVertices[i].tu = vertices[i].u * mMaxTotalU;
+				nativeVertices[i].tv = vertices[i].v * mMaxTotalV;
+			}
+			DrawVertexTriangle(&texture, nativeVertices[0], nativeVertices[1], nativeVertices[2]);
+		}
 	}
 	else
 	{
@@ -1218,7 +1172,7 @@ void TextureData::BltTriangles(const TriVertex theVertices[][3], int theNumTrian
 		{
 			TriVertex* aTriVerts = (TriVertex*) theVertices[aTriangleNum];
 
-			GLVertex aVertex[3] = {
+			Ps2Vertex aVertex[3] = {
 				{ {aTriVerts[0].x + tx},{aTriVerts[0].y + ty},	{0},{GetColorFromTriVertex(aTriVerts[0],theColor)},	{aTriVerts[0].u*mMaxTotalU},{aTriVerts[0].v*mMaxTotalV} },
 				{ {aTriVerts[1].x + tx},{aTriVerts[1].y + ty},	{0},{GetColorFromTriVertex(aTriVerts[1],theColor)},	{aTriVerts[1].u*mMaxTotalU},{aTriVerts[1].v*mMaxTotalV} },
 				{ {aTriVerts[2].x + tx},{aTriVerts[2].y + ty},	{0},{GetColorFromTriVertex(aTriVerts[2],theColor)},	{aTriVerts[2].u*mMaxTotalU},{aTriVerts[2].v*mMaxTotalV} }
@@ -1286,10 +1240,8 @@ void TextureData::BltTriangles(const TriVertex theVertices[][3], int theNumTrian
 					DoPolyTextureClip(aList);
 					if (aList.size() >= 3)
 					{
-						glBindTexture(GL_TEXTURE_2D, aPiece.mTexture);
-						GfxBegin(GL_TRIANGLE_FAN);
-						GfxAddVertices(aList);
-						GfxEnd();
+						PrepareTextureForDraw(aPiece.mTexture);
+						DrawVertexFan(aList, &aPiece.mTexture);
 					}
 				}
 			}
@@ -1318,10 +1270,7 @@ GLInterface::GLInterface(SexyAppBase* theApp)
 	mCursorX = 0;
 	mCursorY = 0;
 
-	gVertexMode = (GLenum)-1;
-	gNumVertices = 0;
-	gVertices = new GLVertex[MAX_VERTICES];
-	memset(gVertices, 0, sizeof(GLVertex) * MAX_VERTICES);
+
 }
 
 GLInterface::~GLInterface()
@@ -1336,35 +1285,27 @@ GLInterface::~GLInterface()
 		anImage->mD3DData = NULL;
 	}
 
-	delete[] gVertices;
 }
 
 void GLInterface::SetDrawMode(int theDrawMode)
 {
-	if (theDrawMode == Graphics::DRAWMODE_NORMAL)
-	{
-		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-	}
-	else // Additive
-	{
-		glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-	}
+	Ps2GsRendererSetBlendAdditive(theDrawMode != Graphics::DRAWMODE_NORMAL);
 }
 
 void GLInterface::AddGLImage(GLImage* theGLImage)
 {
 	AutoCrit anAutoCrit(mCritSect);
 
-	mGLImageSet.insert(theGLImage);
+	mPs2ImageSet.insert(theGLImage);
 }
 
 void GLInterface::RemoveGLImage(GLImage* theGLImage)
 {
 	AutoCrit anAutoCrit(mCritSect);
 
-	GLImageSet::iterator anItr = mGLImageSet.find(theGLImage);
-	if (anItr != mGLImageSet.end())
-		mGLImageSet.erase(anItr);
+	Ps2ImageSet::iterator anItr = mPs2ImageSet.find(theGLImage);
+	if (anItr != mPs2ImageSet.end())
+		mPs2ImageSet.erase(anItr);
 }
 
 void GLInterface::Remove3DData(MemoryImage* theImage)
@@ -1386,9 +1327,6 @@ GLImage* GLInterface::GetScreenImage()
 
 void GLInterface::UpdateViewport()
 {
-	// Restrict to 4:3
-	// https://bumbershootsoft.wordpress.com/2018/11/29/forcing-an-aspect-ratio-in-3d-with-opengl/
-
 	int width, viewport_width;
 	int height, viewport_height;
 	int viewport_x = 0;
@@ -1397,7 +1335,7 @@ void GLInterface::UpdateViewport()
 	width = gsGlobal ? (int)gsGlobal->Width : mWidth;
 	height = gsGlobal ? (int)gsGlobal->Height : mHeight;
 
-	glClear(GL_COLOR_BUFFER_BIT);
+	Ps2GsRendererClear(0, 0, 0, 255);
 	Flush();
 
 	// No aspect-ratio letterboxing on PS2: the TV scans the full framebuffer
@@ -1405,45 +1343,28 @@ void GLInterface::UpdateViewport()
 	// the whole buffer is the correct 4:3 target for the 800x600 game.
 	viewport_width = width;
 	viewport_height = height;
-	glViewport(viewport_x, viewport_y, viewport_width, viewport_height);
 	mPresentationRect = Rect( viewport_x, viewport_y, viewport_width, viewport_height );
+	Ps2GsRendererSetLogicalSize(mWidth, mHeight);
 
-	glClear(GL_COLOR_BUFFER_BIT);
+	Ps2GsRendererClear(0, 0, 0, 255);
 	Flush();
 }
 
 int GLInterface::Init(bool IsWindowed)
 {
-	int aMaxSize;
-	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &aMaxSize);
-	if (aMaxSize <= 0)
-		aMaxSize = 1024;
+	const int aMaxSize = PS2_GS_MAX_TEXTURE_SIZE;
 	MAX_TEXTURE_SIZE = aMaxSize;
-
-	glClearColor(0, 0, 0, 1);
-	glClear(GL_COLOR_BUFFER_BIT);
 
 	gTextureSizeMustBePow2 = false;
 	gMinTextureWidth = 8;
 	gMinTextureHeight = 8;
 	gMaxTextureWidth = aMaxSize;
 	gMaxTextureHeight = aMaxSize;
-	// The normal GL upload still expects 32-bit BGRA. Palette8 uses a private
-	// PS2 path that uploads PNG indices directly as GS PSMT8 + CT32 CLUT.
 	gSupportedPixelFormats = PixelFormat_A8R8G8B8 | PixelFormat_Palette8;
 	gLinearFilter = false;
 
-	glMatrixMode(GL_MODELVIEW);
-	glLoadIdentity();
-	glMatrixMode(GL_PROJECTION);
-	glLoadIdentity();
-	glOrtho(0, mWidth-1, mHeight-1, 0, -10, 10);
-
-	glEnable(GL_BLEND);
-	glDisable(GL_LIGHTING);
-	glDisable(GL_DITHER);
-	glDisable(GL_DEPTH_TEST);
-	glDisable(GL_CULL_FACE);
+	Ps2GsRendererInit(mWidth, mHeight);
+	Ps2GsRendererClear(0, 0, 0, 255);
 
 	mRGBBits = 32;
 
@@ -1464,30 +1385,54 @@ int GLInterface::Init(bool IsWindowed)
 	return 1;
 }
 
-// Defined in Input.cpp: pad-driven cursor position in GS screen coordinates.
+// Defined in Input.cpp: pad-driven cursor position in screen coordinates.
 void Ps2GetCursorPos(float& x, float& y);
+
+static void DrawPs2SoftwareCursor(float x, float y)
+{
+	const uint32_t black = 0xFF000000;
+	const uint32_t white = 0xFFFFFFFF;
+	Ps2GsRendererSetBlendAdditive(false);
+	Ps2GsRendererDrawTriangle(x - 1.5f, y - 2.0f, black,
+		x - 1.5f, y + 18.0f, black, x + 13.0f, y + 12.5f, black);
+	Ps2GsRendererDrawTriangle(x, y, white, x, y + 14.0f, white,
+		x + 10.0f, y + 10.0f, white);
+}
 
 bool GLInterface::Redraw(Rect* theClipRect)
 {
 	// The PS2 has no OS cursor; overlay a software arrow as the very last
-	// thing before the flip so it draws on top of the frame.
+	// thing before the flip so it draws on top of the frame. Ps2GetCursorPos
+	// returns GS physical-pixel coordinates (the space Input.cpp's pad/mouse
+	// handling and RemapMouse both use), while this renderer operates in logical
+	// widget space (mWidth x mHeight). Rescale through mPresentationRect ->
+	// mApp->mScreenBounds -- the same source/dest rects WidgetManager::
+	// RemapMouse uses -- so the drawn arrow lands where the widget system
+	// thinks the cursor is, instead of being confined to whatever fraction
+	// of the screen the physical GS buffer is smaller than the logical space.
 	float aCursorX, aCursorY;
 	Ps2GetCursorPos(aCursorX, aCursorY);
-	ps2_draw_cursor(aCursorX, aCursorY);
+	if (mApp != NULL && mPresentationRect.mWidth > 0 && mPresentationRect.mHeight > 0)
+	{
+		const Rect& aDest = mApp->mScreenBounds;
+		aCursorX = (aCursorX - mPresentationRect.mX) * (float)aDest.mWidth / (float)mPresentationRect.mWidth + aDest.mX;
+		aCursorY = (aCursorY - mPresentationRect.mY) * (float)aDest.mHeight / (float)mPresentationRect.mHeight + aDest.mY;
+	}
+	DrawPs2SoftwareCursor(aCursorX, aCursorY);
 
 	// Boot/loading heartbeat. The title screen's first intentional frame is
 	// black; this tiny marker shows whether Redraw keeps running after that.
 	if (gsGlobal && mApp && !mApp->mLoaded)
 	{
 		static int sBootMarkerFrame = 0;
-		static const u64 kMarkerColors[] = {
-			GS_SETREG_RGBAQ(0xFF, 0xFF, 0xFF, 0x80, 0),
-			GS_SETREG_RGBAQ(0x00, 0xFF, 0x00, 0x80, 0),
-			GS_SETREG_RGBAQ(0xFF, 0xFF, 0x00, 0x80, 0),
-			GS_SETREG_RGBAQ(0x00, 0xFF, 0xFF, 0x80, 0)
+		static const uint32_t kMarkerColors[] = {
+			0xFFFFFFFF,
+			0xFF00FF00,
+			0xFF00FFFF,
+			0xFFFFFF00
 		};
-		u64 aColor = kMarkerColors[(sBootMarkerFrame++ / 15) & 3];
-		gsKit_prim_sprite(gsGlobal, 0.0f, 0.0f, 10.0f, 10.0f, 0xFFFF, aColor);
+		const uint32_t aColor = kMarkerColors[(sBootMarkerFrame++ / 15) & 3];
+		Ps2GsRendererDrawSolidSprite(0.0f, 0.0f, 10.0f, 10.0f, aColor);
 	}
 
 	Flush();
@@ -1522,25 +1467,12 @@ void GLInterface::SetCursorPos(int theCursorX, int theCursorY)
 bool GLInterface::PreDraw()
 {
 	gLinearFilter = false;
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	return true;
 }
 
-extern "C" void ps2_dbg_tex_census(void);
-
 void GLInterface::Flush()
 {
-	gNumVertices = 0;
-	if (!gsGlobal)
-		return;
-
-	gsKit_queue_exec(gsGlobal);
-	gsKit_sync_flip(gsGlobal);
-	if (gsGlobal->Os_Queue)
-		gsKit_queue_reset(gsGlobal->Os_Queue);
-	ps2_dbg_tex_census();
+	Ps2GsRendererPresent();
 }
 
 bool GLInterface::CreateImageTexture(MemoryImage *theImage)
@@ -1558,6 +1490,21 @@ bool GLInterface::CreateImageTexture(MemoryImage *theImage)
 			++sNullDrawLogs;
 			printf("[PS2] CreateImageTexture(NULL) — draw skipped, ra=%p\n",
 				__builtin_return_address(0));
+		}
+		return false;
+	}
+
+	// A zero logical dimension produces a zero-sized texture grid. Besides
+	// being invalid for the GS, CreateTextureDimensions expects at least one
+	// piece and would otherwise access vector::back() on an empty vector.
+	if (theImage->mWidth <= 0 || theImage->mHeight <= 0)
+	{
+		static int sZeroSizeLogs = 0;
+		if (sZeroSizeLogs < 8)
+		{
+			++sZeroSizeLogs;
+			printf("[PS2] zero-sized image %dx%d skipped in CreateImageTexture, ra=%p\n",
+				theImage->mWidth, theImage->mHeight, __builtin_return_address(0));
 		}
 		return false;
 	}
@@ -1602,8 +1549,8 @@ bool GLInterface::RecoverBits(MemoryImage* theImage)
 		return false;
 
 	// The GS cannot read textures back; reconstruct the pixels from the CPU
-	// copies the GL shim keeps (lossy: CT16 5-bit color, 1-bit alpha). mBits
-	// was already allocated by the calling GetBits().
+	// copies kept by the native texture backend. mBits was already allocated by
+	// the calling GetBits().
 	uint32_t* aBits = theImage->mBits;
 	if (aBits == NULL)
 		return false;
@@ -1621,9 +1568,8 @@ bool GLInterface::RecoverBits(MemoryImage* theImage)
 			if (aWidth <= 0 || aHeight <= 0)
 				continue;
 
-			if (!ps2_gles_read_texture(aPiece->mTexture,
-					(unsigned int*)(aBits + offy*theImage->mWidth + offx),
-					theImage->mWidth, aWidth, aHeight))
+			if (!Ps2GsTextureRead(&aPiece->mTexture, 0, 0, aWidth, aHeight,
+					(aBits + offy*theImage->mWidth + offx), theImage->mWidth))
 				return false;
 		}
 	}
@@ -1693,6 +1639,10 @@ void GLInterface::BltMirror(Image* theImage, float theX, float theY, const Rect&
 
 void GLInterface::StretchBlt(Image* theImage,  const Rect& theDestRect, const Rect& theSrcRect, const Rect* theClipRect, const Color &theColor, int theDrawMode, bool fastStretch, bool mirror)
 {
+	if (theSrcRect.mWidth <= 0 || theSrcRect.mHeight <= 0 ||
+		theDestRect.mWidth == 0 || theDestRect.mHeight == 0)
+		return;
+
 	float xScale = (float)theDestRect.mWidth / theSrcRect.mWidth;
 	float yScale = (float)theDestRect.mHeight / theSrcRect.mHeight;
 
@@ -1791,17 +1741,7 @@ void GLInterface::DrawLine(double theStartX, double theStartY, double theEndX, d
 		y2 = theEndY;
 	}
 
-	glDisable(GL_TEXTURE_2D);
-
-	GLVertex aVertex[3] = {
-		{ {x1},{y1},{0},{theColor.ToInt()},{0},{0} },
-		{ {x2},{y2},{0},{theColor.ToInt()},{0},{0} },
-		{ {x2+0.5f},{y2+0.5f},{0},{theColor.ToInt()},{0},{0} },
-	};
-
-	GfxBegin(GL_LINE_STRIP);
-	GfxAddVertices(aVertex, 3);
-	GfxEnd();
+	Ps2GsRendererDrawLine(x1, y1, x2, y2, theColor.ToInt());
 }
 
 void GLInterface::FillRect(const Rect& theRect, const Color& theColor, int theDrawMode)
@@ -1816,7 +1756,13 @@ void GLInterface::FillRect(const Rect& theRect, const Color& theColor, int theDr
 	float aWidth = theRect.mWidth;
 	float aHeight = theRect.mHeight;
 
-	GLVertex aVertex[4] = {
+	if (mTransformStack.empty())
+	{
+		Ps2GsRendererDrawSolidSprite(x, y, x + aWidth, y + aHeight, theColor.ToInt());
+		return;
+	}
+
+	Ps2Vertex aVertex[4] = {
 		{ {x},        {y},         {0},{theColor.ToInt()},{0},{0} },
 		{ {x},        {y+aHeight}, {0},{theColor.ToInt()},{0},{0} },
 		{ {x+aWidth}, {y},         {0},{theColor.ToInt()},{0},{0} },
@@ -1838,11 +1784,8 @@ void GLInterface::FillRect(const Rect& theRect, const Color& theColor, int theDr
 		}
 	}
 
-	glDisable(GL_TEXTURE_2D);
-
-	GfxBegin(GL_TRIANGLE_STRIP);
-	GfxAddVertices(aVertex, 4);
-	GfxEnd();
+	DrawVertexTriangle(NULL, aVertex[0], aVertex[1], aVertex[2]);
+	DrawVertexTriangle(NULL, aVertex[2], aVertex[1], aVertex[3]);
 }
 
 void GLInterface::DrawTriangle(const TriVertex &p1, const TriVertex &p2, const TriVertex &p3, const Color &theColor, int theDrawMode)
@@ -1854,20 +1797,10 @@ void GLInterface::DrawTriangle(const TriVertex &p1, const TriVertex &p2, const T
 
 	unsigned int aColor = (theColor.mRed << 0) | (theColor.mGreen << 8) | (theColor.mBlue << 16) | (theColor.mAlpha << 24);
 	unsigned int col1 = GetColorFromTriVertex(p1, aColor);
-	unsigned int col2 = GetColorFromTriVertex(p1, aColor);
-	unsigned int col3 = GetColorFromTriVertex(p1, aColor);
+	unsigned int col2 = GetColorFromTriVertex(p2, aColor);
+	unsigned int col3 = GetColorFromTriVertex(p3, aColor);
 
-	glDisable(GL_TEXTURE_2D);
-
-	GLVertex aVertex[3] = {
-		{ {p1.x}, {p1.y}, {0}, {col1}, {0},{0} },
-		{ {p2.x}, {p2.y}, {0}, {col2}, {0},{0} },
-		{ {p3.x}, {p3.y}, {0}, {col3}, {0},{0} },
-	};
-
-	GfxBegin(GL_TRIANGLE_STRIP);
-	GfxAddVertices(aVertex, 3);
-	GfxEnd();
+	Ps2GsRendererDrawTriangle(p1.x, p1.y, col1, p2.x, p2.y, col2, p3.x, p3.y, col3);
 }
 
 void GLInterface::DrawTriangleTex(const TriVertex &p1, const TriVertex &p2, const TriVertex &p3, const Color &theColor, int theDrawMode, Image *theTexture, bool blend)
@@ -1924,12 +1857,10 @@ void GLInterface::FillPoly(const Point theVertices[], int theNumVertices, const 
 	SetDrawMode(theDrawMode);
 	unsigned int aColor = (theColor.mRed << 0) | (theColor.mGreen << 8) | (theColor.mBlue << 16) | (theColor.mAlpha << 24);
 
-	glDisable(GL_TEXTURE_2D);
-
 	VertexList aList;
 	for (int i=0; i<theNumVertices; i++)
 	{
-		GLVertex vert = { {theVertices[i].mX + (float)tx}, {theVertices[i].mY + (float)ty}, {0}, {aColor}, {0}, {0} };
+		Ps2Vertex vert = { {theVertices[i].mX + (float)tx}, {theVertices[i].mY + (float)ty}, {0}, {aColor}, {0}, {0} };
 		if (!mTransformStack.empty())
 		{
 			SexyVector2 v(vert.sx,vert.sy);
@@ -1942,11 +1873,7 @@ void GLInterface::FillPoly(const Point theVertices[], int theNumVertices, const 
 	}
 
 	if (theClipRect != NULL)
-		DrawPolyClipped(theClipRect,aList);
+		DrawPolyClipped(theClipRect, aList, NULL);
 	else
-	{
-		GfxBegin(GL_TRIANGLE_FAN);
-		GfxAddVertices(aList);
-		GfxEnd();
-	}
+		DrawVertexFan(aList, NULL);
 }

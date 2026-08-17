@@ -15,6 +15,10 @@ ReanimAtlas::ReanimAtlas()
 {
 	mImageCount = 0;
 	mMemoryImage = nullptr;
+#ifdef WII_PLATFORM
+	memset(mImageHash, 0, sizeof(mImageHash));
+	mImageHashValid = false;
+#endif
 }
 
 void ReanimAtlas::ReanimAtlasDispose()
@@ -25,6 +29,10 @@ void ReanimAtlas::ReanimAtlasDispose()
 		mMemoryImage = nullptr;
 	}
 	mImageCount = 0;
+#ifdef WII_PLATFORM
+	memset(mImageHash, 0, sizeof(mImageHash));
+	mImageHashValid = false;
+#endif
 }
 
 ReanimAtlasImage* ReanimAtlas::GetEncodedReanimAtlas(Image* theImage)
@@ -104,8 +112,7 @@ bool sSortByNonIncreasingHeight(const ReanimAtlasImage& image1, const ReanimAtla
 		return image1.mHeight > image2.mHeight;
 	else if (image1.mWidth != image2.mWidth)
 		return image1.mWidth > image2.mWidth;
-	else
-		return (uintptr_t)&image1 > (uintptr_t)&image2;
+	return false;
 }
 
 static int GetClosestPowerOf2Above(int theNum)
@@ -238,6 +245,9 @@ void ReanimAtlas::AddImage(Image* theImage)
 		TOD_ASSERT(mImageCount < MAX_REANIM_IMAGES);
 
 		ReanimAtlasImage* aImage = &mImageArray[mImageCount++];
+#ifdef WII_PLATFORM
+		mImageHashValid = false;
+#endif
 		aImage->mHeight = theImage->mHeight;
 		aImage->mWidth = theImage->mWidth;
 		aImage->mOriginalImage = theImage;
@@ -246,12 +256,47 @@ void ReanimAtlas::AddImage(Image* theImage)
 
 int ReanimAtlas::FindImage(Image* theImage)
 {
+#ifdef WII_PLATFORM
+	if (mImageHashValid)
+	{
+		unsigned int aSlot = ((uintptr_t)theImage >> 4) & 127U;
+		for (unsigned int aProbe = 0; aProbe < 128U; aProbe++)
+		{
+			unsigned char aStored = mImageHash[aSlot];
+			if (aStored == 0)
+				return -1;
+
+			int aIndex = (int)aStored - 1;
+			if (mImageArray[aIndex].mOriginalImage == theImage)
+				return aIndex;
+
+			aSlot = (aSlot + 1U) & 127U;
+		}
+		return -1;
+	}
+#endif
+
 	for (int i = 0; i < mImageCount; i++)
 		if (mImageArray[i].mOriginalImage == theImage)
 			return i;
 
 	return -1;
 }
+
+#ifdef WII_PLATFORM
+void ReanimAtlas::RebuildImageHash()
+{
+	memset(mImageHash, 0, sizeof(mImageHash));
+	for (int i = 0; i < mImageCount; i++)
+	{
+		unsigned int aSlot = ((uintptr_t)mImageArray[i].mOriginalImage >> 4) & 127U;
+		while (mImageHash[aSlot] != 0)
+			aSlot = (aSlot + 1U) & 127U;
+		mImageHash[aSlot] = (unsigned char)(i + 1);
+	}
+	mImageHashValid = true;
+}
+#endif
 
 //0x470680
 void ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
@@ -303,6 +348,18 @@ void ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
 #if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 	if (aSkippedCount > 0)
 		printf("[ATLAS] %d images left un-atlased (pixel budget)\n", aSkippedCount);
+
+	// Text-only/fullscreen reanimations legitimately contain no Image tracks.
+	// A zero-image atlas used to become a 1x0 surface; the PS2 native texture
+	// path cannot represent that safely on real hardware. No backing surface
+	// is needed when there are no source images.
+	if (mImageCount == 0)
+	{
+#ifdef PS2_PLATFORM
+		printf("[ATLAS] no images; skipping atlas surface\n");
+#endif
+		return;
+	}
 #endif
 
 	int aAtlasWidth, aAtlasHeight;
@@ -310,6 +367,9 @@ void ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
 	printf("[ATLAS] arranging %d images...\n", mImageCount);
 #endif
 	ArrangeImages(aAtlasWidth, aAtlasHeight);
+#ifdef WII_PLATFORM
+	RebuildImageHash();
+#endif
 #ifdef PS2_PLATFORM
 	printf("[ATLAS] arranged: %dx%d (%.2f MB texture)\n",
 		aAtlasWidth, aAtlasHeight,

@@ -14,8 +14,16 @@ if /I "%~1"=="clean" (
 REM El log siempre va a <prefijo de guardado>/userdata/log.txt (como el juego
 REM original). El tracer de colores de borde esta apagado por defecto; para
 REM activarlo, poner PS2_TRACE_ENABLE a 1 en Ps2Trace.h y recompilar.
-cmake --preset ps2-release
-cmake --build --preset ps2-release --parallel
+set "CMAKE_EXE=C:\Program Files\CMake\bin\cmake.exe"
+if not exist "%CMAKE_EXE%" (
+    echo ERROR: Native Windows CMake was not found at "%CMAKE_EXE%".
+    exit /b 1
+)
+
+"%CMAKE_EXE%" --preset ps2-release -DSEXY_LOG_LEVEL=0
+if errorlevel 1 exit /b 1
+"%CMAKE_EXE%" --build --preset ps2-release --parallel
+if errorlevel 1 exit /b 1
 pause
 
 
@@ -50,4 +58,3 @@ echo   ISO: %ISO_NAME%
 
 :end
 pause
-

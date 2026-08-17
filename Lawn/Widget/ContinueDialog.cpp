@@ -1,4 +1,5 @@
 #include "../Board.h"
+#include "../System/Music.h"
 #include "../Zombie.h"
 #include "GameButton.h"
 #include "../../LawnApp.h"
@@ -121,6 +122,15 @@ void ContinueDialog::ButtonDepress(int theId)
         }
 
         RestartLoopingSounds();
+
+        // The save file contains Music's logical state, but the actual music
+        // stream was stopped when the previous board was torn down. A loaded
+        // save can therefore claim that the correct tune is already selected
+        // and make StartGameMusic skip reopening it. Reset that stale state and
+        // recreate the stream for the restored board.
+        mApp->mMusic->StopAllMusic();
+        mApp->mMusic->StartGameMusic(mApp->mBoard);
+
         mApp->KillDialog(mId);
     }
     else if (theId == ContinueDialog::ContinueDialog_NewGame)

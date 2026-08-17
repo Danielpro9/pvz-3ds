@@ -1212,6 +1212,9 @@ void Zombie::BungeeLiftTarget()
 #endif
 
     aPlant->mOnBungeeState = PlantOnBungeeState::RISING_WITH_BUNGEE;
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+    mBoard->InvalidatePlantGridCache();
+#endif
     mApp->PlayFoley(FoleyType::FOLEY_FLOOP);
     
     Reanimation* aPlantReanim = mApp->ReanimationTryToGet(aPlant->mBodyReanimID);

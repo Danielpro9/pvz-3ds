@@ -16,12 +16,12 @@ extern "C" {
 // ISO), so assets must be read from the disc through the cdfs driver while
 // saves go to a writable device. Pass "" if argv is unavailable.
 //
-// Save location priority:  "mass:/PVZ/" (USB) -> "mc0:/PVZ/" (memory card)
-//                          -> "" (current dir; PCSX2 host filesystem).
+// Non-CD boots use the ELF directory chosen by SexyAppBase. CD/DVD boots use
+// "mass:/PVZ/" when USB is writable, then "mc0:/PVZ/" as a fallback.
 void Ps2PvzInitServices(const char* theArgv0);
 
-// Prefix ending in '/' (or empty for cwd) where all persistent WRITES go
-// (log, userdata saves, registry).
+// Prefix ending in '/' for CD/DVD save fallback. Empty on normal USB/host
+// boots, where SexyAppBase selects the ELF directory as the write location.
 const char* Ps2GetSavePrefix(void);
 
 // Prefix prepended to relative asset READ paths. Empty on host:/USB (assets
@@ -36,6 +36,10 @@ bool Ps2AudioAvailable(void);
 // True if the USB mouse driver (ps2mouse.irx) loaded and its RPC server
 // bound; Input.cpp only polls the mouse when this holds.
 bool Ps2MouseAvailable(void);
+
+// Asset-cache pressure policy for the EE heap. The game layer asks this
+// instead of depending on mallinfo() or PS2 memory thresholds directly.
+bool Ps2ShouldPurgeAssets(void);
 
 #ifdef __cplusplus
 }

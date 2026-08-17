@@ -5,7 +5,7 @@
 #include "WidgetManager.h"
 #include "ButtonListener.h"
 #include "../../Resources.h" // bad
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 #include "../../Sexy.TodLib/TodDebug.h"
 
 extern SexyString (*gGetCurrentLevelName)();
@@ -276,7 +276,7 @@ void ButtonWidget::MouseUp(int theX, int theY, int theBtnNum, int theClickCount)
 
 void ButtonWidget::Update()
 {
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 	bool aLogButtonUpdate = Ps2ShouldLogButtonUpdate();
 	if (aLogButtonUpdate)
 		TodHesitationTrace("BTNUPDATE begin id=%d ptr=%p over=%d down=%d disabled=%d alpha=%.2f",
@@ -307,7 +307,7 @@ void ButtonWidget::Update()
 			mOverAlpha = 1;
 		MarkDirty();
 	}
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 	if (aLogButtonUpdate)
 		TodHesitationTrace("BTNUPDATE end id=%d ptr=%p alpha=%.2f dirty=%d",
 			mId, this, mOverAlpha, mDirty ? 1 : 0);

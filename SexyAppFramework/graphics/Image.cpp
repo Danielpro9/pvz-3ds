@@ -45,20 +45,21 @@ int	Image::GetHeight()
 
 int Image::GetCelHeight()
 {
-	return mHeight / mNumRows;
+	return mNumRows > 0 ? mHeight / mNumRows : mHeight;
 }
 
 int Image::GetCelWidth()
 {
-	return mWidth / mNumCols;
+	return mNumCols > 0 ? mWidth / mNumCols : mWidth;
 }
 
 Rect Image::GetCelRect(int theCel)
 {
 	int h = GetCelHeight();
 	int w = GetCelWidth();
-	int x = (theCel % mNumCols) * w;
-	int y = (theCel / mNumCols) * h;
+	int aNumCols = mNumCols > 0 ? mNumCols : 1;
+	int x = (theCel % aNumCols) * w;
+	int y = (theCel / aNumCols) * h;
 
 	return Rect(x, y, w, h);
 }

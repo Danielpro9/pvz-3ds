@@ -53,8 +53,16 @@ public:
 	void DataArrayInitialize(unsigned int theMaxSize, const char* theName)
 	{
 		TOD_ASSERT(mBlock == nullptr);
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+		unsigned int aBitWordCount = (theMaxSize + 31U) >> 5;
+		mBlock = (DataArrayItem*)operator new(sizeof(DataArrayItem) * theMaxSize + sizeof(unsigned int) * aBitWordCount);
+#else
 		mBlock = (DataArrayItem*)operator new(sizeof(DataArrayItem) * theMaxSize);
+#endif
 		mMaxSize = theMaxSize;
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+		memset(DataArrayGetIterationBits(), 0, sizeof(unsigned int) * aBitWordCount);
+#endif
 		mNextKey = 1001U;
 		mName = theName;
 	}
@@ -80,6 +88,9 @@ public:
 		TOD_ASSERT(DataArrayGet(aItem->mID) == theItem, "Failed: DataArrayFree(0x%x) in %s", theItem, mName);
 		theItem->~T();
 		unsigned int anId = aItem->mID & DATA_ARRAY_INDEX_MASK;
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+		DataArraySetIterationBit(anId, false);
+#endif
 		aItem->mID = mFreeListHead;
 		mFreeListHead = anId;
 		mSize--;
@@ -93,6 +104,9 @@ public:
 
 		mFreeListHead = 0U;
 		mMaxUsedCount = 0U;
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+		memset(DataArrayGetIterationBits(), 0, sizeof(unsigned int) * DataArrayGetIterationBitWordCount());
+#endif
 	}
 
 	inline unsigned int DataArrayGetID(T* theItem)
@@ -104,6 +118,47 @@ public:
 
 	bool IterateNext(T*& theItem)
 	{
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+		if (mMaxUsedCount == 0U)
+			return false;
+
+		unsigned int anIndex = 0U;
+		if (theItem != nullptr)
+			anIndex = (unsigned int)((DataArrayItem*)theItem - mBlock) + 1U;
+
+		if (anIndex >= mMaxUsedCount)
+			return false;
+
+		unsigned int* anIterationBits = DataArrayGetIterationBits();
+		unsigned int aWordIndex = anIndex >> 5;
+		unsigned int aBitOffset = anIndex & 31U;
+		unsigned int aWord = anIterationBits[aWordIndex] & (~0U << aBitOffset);
+
+		while (true)
+		{
+			if (aWord != 0U)
+			{
+				unsigned int aFoundIndex;
+				if (aWord & (1U << aBitOffset))
+					aFoundIndex = anIndex;
+				else
+					aFoundIndex = (aWordIndex << 5) + DataArrayFindFirstSetBit(aWord);
+				if (aFoundIndex < mMaxUsedCount)
+				{
+					theItem = (T*)&mBlock[aFoundIndex];
+					return true;
+				}
+				return false;
+			}
+
+			aWordIndex++;
+			if ((aWordIndex << 5) >= mMaxUsedCount)
+				return false;
+			anIndex = aWordIndex << 5;
+			aBitOffset = 0U;
+			aWord = anIterationBits[aWordIndex];
+		}
+#else
 		DataArray<T>::DataArrayItem* aItem = (DataArray<T>::DataArrayItem*)theItem;
 		if (aItem == nullptr)
 			aItem = &mBlock[0];
@@ -121,6 +176,7 @@ public:
 			aItem++;
 		}
 		return false;
+#endif
 	}
 
 	T* DataArrayAlloc()
@@ -141,10 +197,66 @@ public:
 		aNewItem->mID = (mNextKey++ << DATA_ARRAY_KEY_SHIFT) | aNext;
 		if (mNextKey == DATA_ARRAY_MAX_SIZE) mNextKey = 1;
 		mSize++;
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+		DataArraySetIterationBit(aNext, true);
+#endif
 
 		new (aNewItem)T();
 		return (T*)aNewItem;
 	}
+
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	unsigned int DataArrayGetIterationBitWordCount() const
+	{
+		return (mMaxSize + 31U) >> 5;
+	}
+
+	unsigned int* DataArrayGetIterationBits()
+	{
+		return (unsigned int*)(mBlock + mMaxSize);
+	}
+
+	void DataArraySetIterationBit(unsigned int theIndex, bool theUsed)
+	{
+		unsigned int* anIterationBits = DataArrayGetIterationBits();
+		unsigned int aMask = 1U << (theIndex & 31U);
+		unsigned int& aWord = anIterationBits[theIndex >> 5];
+		if (theUsed)
+			aWord |= aMask;
+		else
+			aWord &= ~aMask;
+	}
+
+	static unsigned int DataArrayFindFirstSetBit(unsigned int theValue)
+	{
+#if defined(__GNUC__) || defined(__clang__)
+		return (unsigned int)__builtin_ctz(theValue);
+#else
+		unsigned int aBit = 0U;
+		while ((theValue & 1U) == 0U)
+		{
+			theValue >>= 1;
+			aBit++;
+		}
+		return aBit;
+#endif
+	}
+
+	void DataArrayRebuildIterationBits()
+	{
+		unsigned int* anIterationBits = DataArrayGetIterationBits();
+		memset(anIterationBits, 0, sizeof(unsigned int) * DataArrayGetIterationBitWordCount());
+		for (unsigned int i = 0U; i < mMaxUsedCount; i++)
+		{
+			if (mBlock[i].mID & DATA_ARRAY_KEY_MASK)
+				anIterationBits[i >> 5] |= 1U << (i & 31U);
+		}
+	}
+#else
+	void DataArrayRebuildIterationBits()
+	{
+	}
+#endif
 
 	T* DataArrayTryToGet(unsigned int theId)
 	{

@@ -1,8 +1,6 @@
 #pragma once
 
-#if defined(PS2_PLATFORM)
-#include "ps2/gles_ps2.h"
-#elif defined(WII_PLATFORM)
+#if defined(WII_PLATFORM)
 // GL comes from opengx (vendored under src/wii/opengx); gx_wii.h only carries
 // the display-integration hooks that own video, the framebuffers and the flip.
 #include <GL/gl.h>
@@ -30,7 +28,7 @@
 #define GL_QUERY_RESULT_AVAILABLE_ARB   0x8867
 #endif
 
-#if !defined(PS2_PLATFORM) && !defined(WII_PLATFORM)
+#if !defined(WII_PLATFORM)
 // SDL_GL_GetProcAddress-based runtime loaders (desktop only).
 inline void *getProcEither(const char *arbName, const char *coreName)
 {
@@ -79,10 +77,8 @@ inline void glGetQueryObjectuivARB(GLuint query, GLenum parameter, GLuint *value
 }
 
 #else
-// Consolas (PS2 / Wii): no hay hardware de occlusion query — el GS no lo tiene,
-// y GX tampoco (opengx no implementa glGenQueriesARB en absoluto). Stubs que
-// reportan "siempre visible": fail-OPEN, porque devolver 0 marcaria todo como
-// ocluido y borraria el mundo.
+// Wii has no hardware occlusion query support through opengx. Stubs that
+// report always visible so unsupported queries cannot cull the scene.
 inline void glGenQueriesARB(GLsizei n, GLuint *q)
 {
 	for (GLsizei i = 0; i < n; ++i) q[i] = 0;

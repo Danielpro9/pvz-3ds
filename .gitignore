@@ -416,3 +416,8 @@ tools/read-compiled/target
 
 build-*/
 PVZ Wii Port V1.0 OptiJuegos-*/
+.claude*/
+log.txt
+pvz.zip
+re-plants-vs-zombies.zip
+create zip.bat

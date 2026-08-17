@@ -9,9 +9,10 @@
 #include <math.h>
 
 #include "SexyAppBase.h"
-#include "graphics/GLInterface.h"
+#include "graphics/Ps2GraphicsInterface.h"
 #include "misc/KeyCodes.h"
 #include "widget/WidgetManager.h"
+#include "widget/VirtualKeyboard.h"
 #include "Ps2PadState.h"
 #include "Ps2IoLock.h"
 #include "Ps2PvzServices.h"
@@ -24,12 +25,26 @@ static unsigned char sPadBuf[256] __attribute__((aligned(64)));
 static bool sPadReady = false;
 static unsigned short sPrevHeld = 0;
 static unsigned int sPrevMouseButtons = 0;
-static float sCursorX = 320.0f;
-static float sCursorY = 224.0f;
+static float sCursorX = 0.0f;
+static float sCursorY = 0.0f;
+static bool sCursorInitialized = false;
 
-// Read by GLInterface::Redraw to overlay the software cursor each frame.
+static void EnsureCursorInitialized()
+{
+	if (sCursorInitialized)
+		return;
+
+	const float screenW = gsGlobal ? (float)gsGlobal->Width : 640.0f;
+	const float screenH = gsGlobal ? (float)gsGlobal->Height : 224.0f;
+	sCursorX = screenW * 0.5f;
+	sCursorY = screenH * 0.5f;
+	sCursorInitialized = true;
+}
+
+// Read by the PS2 graphics interface to overlay the software cursor each frame.
 void Ps2GetCursorPos(float& x, float& y)
 {
+	EnsureCursorInitialized();
 	x = sCursorX;
 	y = sCursorY;
 }
@@ -214,7 +229,7 @@ static void SendKeyTransitions(SexyAppBase* app, unsigned short pressed, unsigne
 static float AspectY()
 {
 	const float screenW = gsGlobal ? (float)gsGlobal->Width : 640.0f;
-	const float screenH = gsGlobal ? (float)gsGlobal->Height : 448.0f;
+	const float screenH = gsGlobal ? (float)gsGlobal->Height : 224.0f;
 	return (screenH / screenW) * (4.0f / 3.0f);
 }
 
@@ -222,8 +237,9 @@ static float AspectY()
 // and forwards the move to the widget system.
 static void SetCursorPos(SexyAppBase* app, float x, float y)
 {
+	EnsureCursorInitialized();
 	const float screenW = gsGlobal ? (float)gsGlobal->Width : 640.0f;
-	const float screenH = gsGlobal ? (float)gsGlobal->Height : 448.0f;
+	const float screenH = gsGlobal ? (float)gsGlobal->Height : 224.0f;
 	if (x < 0.0f) x = 0.0f;
 	if (y < 0.0f) y = 0.0f;
 	if (x > screenW - 1.0f) x = screenW - 1.0f;
@@ -236,6 +252,7 @@ static void SetCursorPos(SexyAppBase* app, float x, float y)
 // Applies a cursor displacement (from the pad or the mouse).
 static void MoveCursor(SexyAppBase* app, float dx, float dy)
 {
+	EnsureCursorInitialized();
 	if (dx == 0.0f && dy == 0.0f)
 		return;
 	SetCursorPos(app, sCursorX + dx, sCursorY + dy);
@@ -263,6 +280,7 @@ void Ps2WarpCursorToGamePos(int theGameX, int theGameY)
 
 static void ProcessPadInput(SexyAppBase* app, const padButtonStatus& pad)
 {
+	EnsureCursorInitialized();
 	UpdateCalibration(pad);
 
 	unsigned short held = (unsigned short)(0xFFFF ^ pad.btns);
@@ -276,6 +294,26 @@ static void ProcessPadInput(SexyAppBase* app, const padButtonStatus& pad)
 	float ry = sCentered ? Axis(pad.rjoy_v, sRyCenter, 0.18f) : 0.0f;
 
 	ps2PadUpdateSnapshot(0, true, lx, ly, rx, ry, held, pressed, released);
+
+	// On-screen keyboard: it takes the D-Pad, Cross and Triangle while the
+	// player is driving it that way, and returns false in pointer mode, where
+	// the cursor aims at keys and everything below behaves as it always has.
+	// Without this the directions would move the edit caret and Cross would
+	// click at wherever the cursor sits.
+	unsigned int aNav = 0;
+	if (held & PS2_PAD_LEFT)		aNav |= VKNAV_LEFT;
+	if (held & PS2_PAD_RIGHT)		aNav |= VKNAV_RIGHT;
+	if (held & PS2_PAD_UP)			aNav |= VKNAV_UP;
+	if (held & PS2_PAD_DOWN)		aNav |= VKNAV_DOWN;
+	if (held & PS2_PAD_CROSS)		aNav |= VKNAV_ACCEPT;
+	if (held & PS2_PAD_TRIANGLE)	aNav |= VKNAV_BACK;
+	const bool aKeyboardNav = VirtualKeyboardFeedNav(aNav);
+	if (aKeyboardNav)
+	{
+		if (pressed || released)
+			app->mLastUserInputTick = app->mLastTimerTime;
+		return;
+	}
 
 	bool aBoardMode = ps2GetPadBoardMode();
 
@@ -320,6 +358,7 @@ static void ProcessPadInput(SexyAppBase* app, const padButtonStatus& pad)
 // non-square-pixel correction.
 static void ProcessMouseInput(SexyAppBase* app, const mouse_data& theMouse)
 {
+	EnsureCursorInitialized();
 	MoveCursor(app, (float)theMouse.x, (float)theMouse.y * AspectY());
 
 	// Double-click bits (PS2MOUSE_BTN*DBL, high byte) are ignored: the widget
@@ -341,16 +380,22 @@ static void ProcessMouseInput(SexyAppBase* app, const mouse_data& theMouse)
 
 void SexyAppBase::InitInput()
 {
+	EnsureCursorInitialized();
 	InitPad();
 }
 
+// The PS2 has no OS text input, so the new-profile dialog was unreachable
+// without a USB keyboard: it refuses an empty name. The shared on-screen
+// keyboard (SexyAppFramework/widget/VirtualKeyboard) covers it, driven by the
+// pad's D-Pad or by the cursor.
 bool SexyAppBase::StartTextInput(std::string&)
 {
-	return false;
+	return VirtualKeyboardShow(this);
 }
 
 void SexyAppBase::StopTextInput()
 {
+	VirtualKeyboardHide(this);
 }
 
 bool SexyAppBase::ProcessDeferredMessages(bool)

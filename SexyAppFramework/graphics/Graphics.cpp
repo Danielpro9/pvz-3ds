@@ -219,12 +219,16 @@ void Graphics::DrawRect(const Rect& theRect)
 
 int Graphics::PFCompareInd(const void* u, const void* v) 
 {
-	return mPFPoints[*((int*) u)].mY <= mPFPoints[*((int*) v)].mY ? -1 : 1;
+	float aY1 = mPFPoints[*((int*) u)].mY;
+	float aY2 = mPFPoints[*((int*) v)].mY;
+	return aY1 < aY2 ? -1 : aY1 > aY2 ? 1 : 0;
 }
 
 int Graphics::PFCompareActive(const void* u, const void* v)
 {
-	return ((Edge*) u)->mX <= ((Edge*) v)->mX ? -1 : 1;
+	float aX1 = ((Edge*) u)->mX;
+	float aX2 = ((Edge*) v)->mX;
+	return aX1 < aX2 ? -1 : aX1 > aX2 ? 1 : 0;
 }
 
 void Graphics::PFDelete(int i) // remove edge i from active list
@@ -328,7 +332,7 @@ void Graphics::PolyFill(const Point *theVertexList, int theNumVertices, bool con
 		qsort(mPFActiveEdgeList, mPFNumActiveEdges, sizeof mPFActiveEdgeList[0], PFCompareActive);
 
 		// draw horizontal segments for scanline y 
-		for (j = 0; j < mPFNumActiveEdges; j += 2) 
+		for (j = 0; j + 1 < mPFNumActiveEdges; j += 2)
 		{	// draw horizontal segments 
 			// span 'tween j & j+1 is inside, span tween j+1 & j+2 is outside 
 			xl = (int) ceil(mPFActiveEdgeList[j].mX-0.5);		// left end of span 
@@ -453,7 +457,7 @@ void Graphics::PolyFillAA(const Point *theVertexList, int theNumVertices, bool c
 		qsort(mPFActiveEdgeList, mPFNumActiveEdges, sizeof mPFActiveEdgeList[0], PFCompareActive);
 
 		// draw horizontal segments for scanline y 
-		for (j = 0; j < mPFNumActiveEdges; j += 2) 
+		for (j = 0; j + 1 < mPFNumActiveEdges; j += 2)
 		{	// draw horizontal segments 
 			// span 'tween j & j+1 is inside, span tween j+1 & j+2 is outside 
 			xl = (int) ceil(mPFActiveEdgeList[j].mX-0.5);		// left end of span 
@@ -1036,16 +1040,25 @@ void Graphics::DrawImageBox(const Rect& theSrc, const Rect &theDest, Image* theC
 
 void Graphics::DrawImageCel(Image* theImageStrip, int theX, int theY, int theCel)
 {
+	if (theImageStrip == NULL || theImageStrip->mNumCols <= 0 || theImageStrip->mNumRows <= 0)
+		return;
+
 	DrawImageCel(theImageStrip, theX, theY, theCel % theImageStrip->mNumCols, theCel / theImageStrip->mNumCols); 
 }
 
 void Graphics::DrawImageCel(Image* theImageStrip, const Rect& theDestRect, int theCel)
 {
+	if (theImageStrip == NULL || theImageStrip->mNumCols <= 0 || theImageStrip->mNumRows <= 0)
+		return;
+
 	DrawImageCel(theImageStrip, theDestRect, theCel % theImageStrip->mNumCols, theCel / theImageStrip->mNumCols); 
 }
 
 void Graphics::DrawImageCel(Image* theImageStrip, int theX, int theY, int theCelCol, int theCelRow)
 {
+	if (theImageStrip == NULL || theImageStrip->mNumCols <= 0 || theImageStrip->mNumRows <= 0)
+		return;
+
 	if (theCelRow<0 || theCelCol<0 || theCelRow >= theImageStrip->mNumRows || theCelCol >= theImageStrip->mNumCols)
 		return;
 
@@ -1058,11 +1071,17 @@ void Graphics::DrawImageCel(Image* theImageStrip, int theX, int theY, int theCel
 
 void Graphics::DrawImageAnim(Image* theImageAnim, int theX, int theY, int theTime)
 {
+	if (theImageAnim == NULL)
+		return;
+
 	DrawImageCel(theImageAnim, theX, theY, theImageAnim->GetAnimCel(theTime));
 }
 
 void Graphics::DrawImageCel(Image* theImageStrip, const Rect& theDestRect, int theCelCol, int theCelRow)
 {
+	if (theImageStrip == NULL || theImageStrip->mNumCols <= 0 || theImageStrip->mNumRows <= 0)
+		return;
+
 	if (theCelRow<0 || theCelCol<0 || theCelRow >= theImageStrip->mNumRows || theCelCol >= theImageStrip->mNumCols)
 		return;
 

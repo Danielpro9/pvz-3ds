@@ -372,6 +372,8 @@ template <typename T> inline static void SyncDataArray(SaveGameContext& theConte
 		return;
 	}
 	theContext.SyncBytes(theDataArray.mBlock, theDataArray.mMaxUsedCount * sizeof(*theDataArray.mBlock));
+	if (theContext.mReading)
+		theDataArray.DataArrayRebuildIterationBits();
 }
 
 //0x4819D0

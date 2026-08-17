@@ -87,6 +87,7 @@ extern "C" void SexyLogForcePrintf(const char *theFormat, ...)
 
 extern "C" int __wrap_printf(const char *theFormat, ...)
 {
+#if SEXY_LOG_LEVEL >= 1
 	char aBuffer[SEXY_LOG_LINE_MAX];
 	va_list anArgs;
 	va_start(anArgs, theFormat);
@@ -96,23 +97,33 @@ extern "C" int __wrap_printf(const char *theFormat, ...)
 	if (aCount > 0)
 		SexyLogWrite(aBuffer);
 	return aCount;
+#else
+	(void)theFormat;
+	return 0;
+#endif
 }
 
 extern "C" int __wrap_puts(const char *theString)
 {
+#if SEXY_LOG_LEVEL >= 1
 	// puts appends its own newline; the sinks expect complete lines, so build
 	// one rather than emitting two writes that another thread could interleave.
 	char aBuffer[SEXY_LOG_LINE_MAX];
 	snprintf(aBuffer, sizeof(aBuffer), "%s\n",
 	         theString != nullptr ? theString : "(null)");
 	SexyLogWrite(aBuffer);
+#else
+	(void)theString;
+#endif
 	return 0;
 }
 
 extern "C" int __wrap_putchar(int theChar)
 {
+#if SEXY_LOG_LEVEL >= 1
 	const char aStr[2] = { (char)theChar, '\0' };
 	SexyLogWrite(aStr);
+#endif
 	return theChar;
 }
 

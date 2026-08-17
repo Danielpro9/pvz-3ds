@@ -157,6 +157,15 @@ void AlmanacDialog::SetupZombie()
 {
 	ClearPlantsAndZombies();
 
+#ifdef LOW_MEMORY
+	// The close-up zombie reanimation loads lazily here. Opened mid-game
+	// (SeedChooserScreen) the board behind it is already resident and can
+	// leave no headroom, so CreateTextures fails silently on OOM: the shadow
+	// still draws but Zombie::Draw() renders nothing. Reclaim genuinely
+	// unreferenced assets before asking for new texture memory.
+	mApp->PurgeUnusedAssets();
+#endif
+
 	mZombie = new Zombie();
 	mZombie->mBoard = nullptr;
 	mZombie->ZombieInitialize(0, mSelectedZombie, false, nullptr, Zombie::ZOMBIE_WAVE_UI);

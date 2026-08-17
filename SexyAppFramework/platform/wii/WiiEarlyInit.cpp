@@ -52,8 +52,6 @@
 #ifdef WII_PLATFORM
 
 #include "wii/WiiEarlyInit.h"
-// After WiiEarlyInit.h, which supplies the WII_LOG_LEVEL that SexyLog.h reads
-// as the legacy spelling of SEXY_LOG_LEVEL.
 #include "misc/SexyLog.h"
 
 #include <cerrno>

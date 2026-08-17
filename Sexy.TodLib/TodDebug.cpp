@@ -19,13 +19,9 @@
 // PS2 sound header out of TodLib, same pattern as Reanimator/CreditScreen.
 namespace Sexy { void Ps2MixerIoPauseBegin(); void Ps2MixerIoPauseEnd(); }
 
-// The master switch for this log used to live here as PS2_FILE_LOG. It is now
-// SEXY_LOG_LEVEL in misc/SexyLog.h, which every platform shares; -DPS2_FILE_LOG
-// still works and still means what it did, because SexyLog.h honours it. The
-// reasoning behind defaulting PS2 to off has not changed: every line here is an
-// fopen+fwrite+fclose round-trip on the save device — deliberate, since the last
-// line has to survive a freeze — and thousands of them per load is a real
-// slowdown over USB 1.1.
+// SEXY_LOG_LEVEL is the single build-time logging switch on every platform.
+// PS2 defaults it to off because each persisted line is an open/write/close
+// round-trip on the save device so the last line survives a hard freeze.
 #endif
 
 #ifdef __SWITCH__
@@ -49,6 +45,11 @@ static char gDebugDataFolder[512];
 static char gEarlyLogBuffer[16384];
 static size_t gEarlyLogBufferLen = 0;
 static bool gEarlyLogOverflow = false;
+
+static const size_t PS2_LOG_BUFFER_SIZE = 65536;
+static char gPs2LogBuffer[PS2_LOG_BUFFER_SIZE];
+static size_t gPs2LogBufferLen = 0;
+static size_t gPs2LogDroppedBytes = 0;
 
 static void TodBufferEarlyLog(const char* theMsg)
 {
@@ -216,6 +217,8 @@ extern "C" void TodInitDebugLogForAppData(const char* theAppDataFolder)
 	}
 	gEarlyLogBufferLen = 0;
 	gEarlyLogOverflow = false;
+	gPs2LogBufferLen = 0;
+	gPs2LogDroppedBytes = 0;
 	// fprintf is not link-wrapped like printf, so this reaches the real EE
 	// TTY and PCSX2's console shows where the log landed. Only when running
 	// from host: (PCSX2/ps2link) — on a real console the TTY fio RPC can
@@ -227,13 +230,61 @@ extern "C" void TodInitDebugLogForAppData(const char* theAppDataFolder)
 	Ps2IoLockRelease();
 }
 
-// Unconditional append. Reached through SexyLogSinkWrite below, so it serves
-// both the SEXY_LOG_LEVEL-gated per-line traffic and the fatal-error path
-// (SexyLogForce / TodForceAppendToDebugLog), which must reach the disk even in
-// builds with logging off.
-static void TodAppendToDebugLogUnconditional(const char* theMsg)
+// Normal PS2 logging is buffered in EE RAM. Opening, writing and closing a
+// FAT file for every line makes logging dominate frame time on real hardware.
+// Forced writes still use one synchronous transaction so fatal diagnostics and
+// periodic stress snapshots survive a hard freeze.
+static void TodFlushPs2DebugLog(const char* theForcedMsg)
 {
-	if (theMsg == nullptr)
+	if (gLogFileName[0] == '\0')
+	{
+		if (theForcedMsg != nullptr)
+			TodBufferEarlyLog(theForcedMsg);
+		return;
+	}
+
+	Sexy::Ps2MixerIoPauseBegin();
+	Ps2IoLockAcquire();
+
+	if (gPs2LogBufferLen == 0 && (theForcedMsg == nullptr || theForcedMsg[0] == '\0'))
+	{
+		Ps2IoLockRelease();
+		Sexy::Ps2MixerIoPauseEnd();
+		return;
+	}
+
+	Ps2BootStage(0, 0, 64);
+	FILE* aFile = fopen(gLogFileName, "a");
+	Ps2BootStage(64, 0, 64);
+	if (aFile != nullptr)
+	{
+		if (gPs2LogDroppedBytes > 0)
+		{
+			char aDroppedLine[96];
+			int aDroppedLen = snprintf(aDroppedLine, sizeof(aDroppedLine),
+				"[PS2 DEBUG] buffered log dropped %u old bytes\n",
+				(unsigned int)gPs2LogDroppedBytes);
+			if (aDroppedLen > 0)
+				fwrite(aDroppedLine, 1, (size_t)aDroppedLen, aFile);
+		}
+		if (gPs2LogBufferLen > 0)
+			fwrite(gPs2LogBuffer, 1, gPs2LogBufferLen, aFile);
+		if (theForcedMsg != nullptr && theForcedMsg[0] != '\0')
+			fwrite(theForcedMsg, 1, strlen(theForcedMsg), aFile);
+		Ps2BootStage(64, 64, 0);
+		fclose(aFile);
+		gPs2LogBufferLen = 0;
+		gPs2LogDroppedBytes = 0;
+	}
+	Ps2BootStage(0, 64, 0);
+
+	Ps2IoLockRelease();
+	Sexy::Ps2MixerIoPauseEnd();
+}
+
+static void TodBufferPs2DebugLog(const char* theMsg)
+{
+	if (theMsg == nullptr || theMsg[0] == '\0')
 		return;
 
 	if (gLogFileName[0] == '\0')
@@ -242,58 +293,47 @@ static void TodAppendToDebugLogUnconditional(const char* theMsg)
 		return;
 	}
 
-	// Open-append-close per line, NOT a persistent handle: on FAT (USB stick)
-	// and the memory card, the directory entry's file size is only committed
-	// on close. A handle kept open across a freeze leaves log.txt reading as
-	// 0KB even though every line was fwritten+fflushed into its clusters —
-	// the "log siempre vacío" symptom. Closing per line is slower, but it
-	// guarantees the last line survives any freeze, which is the whole point
-	// of this log.
-	//
-	// Freeze forensics (real HW): the border colour is repainted at each step
-	// of the write (pure GS register, no IO). When the console freezes, the
-	// main-thread heartbeat stops repainting too, so the colour left on the
-	// border names the exact wedged syscall:
-	//   NAVY   (0,0,64)  = stuck inside fopen(log)
-	//   PURPLE (64,0,64) = stuck inside fwrite
-	//   OLIVE  (64,64,0) = stuck inside fclose
-	//   DARK GREEN (0,64,0) = log write completed; freeze is in game code
-	//
-	// Park the mixer for the round-trip: this append is fio on the shared IOP,
-	// and a log line from unparked gameplay code (a TodTrace, a [SAND] print
-	// mid-texture-create) races the mixer's audsrv RPCs — the same wedge class
-	// as any other unparked fio, and it froze the credits on real hardware
-	// right after a lazy refault's parked logs ended. From already-parked
-	// contexts this nests for free; a stray gameplay line pays at most one
-	// mixer chunk (~46ms). The mixer thread itself never printfs (documented
-	// at Ps2CheckAudioGuards), so this cannot self-park.
-	Sexy::Ps2MixerIoPauseBegin();
-	Ps2IoLockAcquire();
-	Ps2BootStage(0, 0, 64);
-	FILE* aFile = fopen(gLogFileName, "a");
-	Ps2BootStage(64, 0, 64);
-	if (aFile != nullptr)
+	const char* aSource = theMsg;
+	size_t aLen = strlen(theMsg);
+	size_t aPreDiscard = 0;
+	if (aLen > PS2_LOG_BUFFER_SIZE)
 	{
-		fwrite(theMsg, 1, strlen(theMsg), aFile);
-		Ps2BootStage(64, 64, 0);
-		fclose(aFile);
+		aPreDiscard = aLen - PS2_LOG_BUFFER_SIZE;
+		aSource += aPreDiscard;
+		aLen = PS2_LOG_BUFFER_SIZE;
 	}
-	Ps2BootStage(0, 64, 0);
+
+	Ps2IoLockAcquire();
+	gPs2LogDroppedBytes += aPreDiscard;
+	if (gPs2LogBufferLen + aLen > PS2_LOG_BUFFER_SIZE)
+	{
+		size_t aDiscard = gPs2LogBufferLen + aLen - PS2_LOG_BUFFER_SIZE;
+		if (aDiscard >= gPs2LogBufferLen)
+		{
+			gPs2LogDroppedBytes += gPs2LogBufferLen;
+			gPs2LogBufferLen = 0;
+		}
+		else
+		{
+			memmove(gPs2LogBuffer, gPs2LogBuffer + aDiscard, gPs2LogBufferLen - aDiscard);
+			gPs2LogBufferLen -= aDiscard;
+			gPs2LogDroppedBytes += aDiscard;
+		}
+	}
+
+	memcpy(gPs2LogBuffer + gPs2LogBufferLen, aSource, aLen);
+	gPs2LogBufferLen += aLen;
 	Ps2IoLockRelease();
-	Sexy::Ps2MixerIoPauseEnd();
 }
 
 extern "C" void TodAppendToDebugLog(const char* theMsg)
 {
-	// Both of these are façades now: the gate and the formatting live in
-	// SexyLog, and TodAppendToDebugLogUnconditional below is reached through
-	// SexyLogSinkWrite like every other writer on this platform.
 	SexyLogWrite(theMsg);
 }
 
 extern "C" void TodForceAppendToDebugLog(const char* theMsg)
 {
-	SexyLogForce(theMsg);
+	TodFlushPs2DebugLog(theMsg);
 }
 
 // The printf/puts/putchar link wraps used to live here. They are in
@@ -314,9 +354,7 @@ extern "C" void SexyLogSinkWrite(const char* theLine)
 		return;
 
 #ifdef PS2_PLATFORM
-	// Open-append-close per line, the mixer park and the border-colour freeze
-	// forensics -- all unchanged, see TodAppendToDebugLogUnconditional.
-	TodAppendToDebugLogUnconditional(theLine);
+	TodBufferPs2DebugLog(theLine);
 #else
 	// Desktop: the same append TodLogString has always done. stderr on failure
 	// rather than silence, because on a desktop somebody is watching a console.
@@ -359,18 +397,12 @@ void TodTrace(const char* theFormat, ...)
 		}
 	}
 
-#ifdef PS2_PLATFORM
-	Ps2IoLockAcquire();
 	printf("%s", aButter);
-	Ps2IoLockRelease();
-#else
-	printf("%s", aButter);
-#endif
 }
 
 void TodHesitationTrace(const char* theFormat, ...)
 {
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 	// PS2 loading diagnostics: print each hesitation point with current heap
 	// usage so a stall shows exactly which step it reached (the original build
 	// leaves this empty). Also report the last delta so growth is visible.
@@ -385,7 +417,6 @@ void TodHesitationTrace(const char* theFormat, ...)
 	TodVsnprintf(aBuffer, sizeof(aBuffer), theFormat, argList);
 	va_end(argList);
 
-	Ps2IoLockAcquire();
 	// free = fordblks: holes INSIDE the malloc arena, not sbrk headroom. A
 	// failed medium alloc with several MB "free" here means no hole was big
 	// enough — that is fragmentation, and the arena figure shows how much of
@@ -396,7 +427,6 @@ void TodHesitationTrace(const char* theFormat, ...)
 		(double)aFree / (1024.0 * 1024.0),
 		Ps2BigUsedBytes() >> 10, PS2_BIG_ARENA_BYTES >> 10,
 		aBuffer);
-	Ps2IoLockRelease();
 	sLastUsed = aUsed;
 #else
 	(void)theFormat;
@@ -425,9 +455,12 @@ void TodTraceAndLog(const char* theFormat, ...)
 	}
 
 	#ifdef PS2_PLATFORM
-	Ps2IoLockAcquire();
 	printf("%s", aButter);
-	Ps2IoLockRelease();
+	#elif defined(WII_PLATFORM)
+	// PrintF and TodLogString share the same Wii sink. Emitting through both
+	// would duplicate every TodTraceAndLog line after PrintF was routed through
+	// the level-gated logger.
+	TodLogString(aButter);
 	#else
 	printf("%s", aButter);
 	TodLogString(aButter);
@@ -475,8 +508,8 @@ void TodTraceWithoutSpamming(const char* theFormat, ...)
 void TodAssertInitForApp()
 {
 #ifdef PS2_PLATFORM
-	// SexyAppBase::Init re-points the app data folder at <cwd>/savedata/,
-	// overriding the boot-time save prefix from Ps2PvzServices. A log opened
+	// SexyAppBase::Init re-points the app data folder at <cwd>/ on non-CD boots,
+	// overriding any boot-time save prefix from Ps2PvzServices. A log opened
 	// at boot can therefore sit somewhere else entirely (e.g. inside mc0:
 	// while saves land on host/USB). Reopen it at the effective location
 	// whenever the path changed; TodInitDebugLogForAppData closes the old

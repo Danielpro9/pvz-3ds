@@ -128,6 +128,9 @@ source_group("Lawn\\Widget\\Widget Source" FILES ${Lawn__Widget__Widget_Source})
 set(TodLib__Common__TodCommon_Include
     "../Sexy.TodLib/DataArray.h"
     "../Sexy.TodLib/Definition.h"
+    "../Sexy.TodLib/DefinitionStreaming.h"
+    "../Sexy.TodLib/DefinitionStreamDecoder.h"
+    "../Sexy.TodLib/DefinitionStreamReader.h"
     "../Sexy.TodLib/TodCommon.h"
     "../Sexy.TodLib/TodDebug.h"
     "../Sexy.TodLib/TodFoley.h"
@@ -138,6 +141,8 @@ source_group("TodLib\\Common\\TodCommon Include" FILES ${TodLib__Common__TodComm
 
 set(TodLib__Common__TodCommon_Source
     "../Sexy.TodLib/Definition.cpp"
+    "../Sexy.TodLib/DefinitionStreaming.cpp"
+    "../Sexy.TodLib/DefinitionStreamDecoder.cpp"
     "../Sexy.TodLib/TodCommon.cpp"
     "../Sexy.TodLib/TodDebug.cpp"
     "../Sexy.TodLib/TodFoley.cpp"
@@ -241,7 +246,16 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 ################################################################################
 # Compile definitions
 ################################################################################
+if(NOT DEFINED SEXY_LOG_LEVEL)
+    set(SEXY_LOG_LEVEL 1 CACHE STRING "Logging verbosity (0=off, 1=normal, 2=verbose)")
+endif()
+set_property(CACHE SEXY_LOG_LEVEL PROPERTY STRINGS 0 1 2)
+if(NOT SEXY_LOG_LEVEL MATCHES "^[012]$")
+    message(FATAL_ERROR "SEXY_LOG_LEVEL must be 0, 1, or 2")
+endif()
+
 target_compile_definitions(${PROJECT_NAME} PRIVATE
+    SEXY_LOG_LEVEL=${SEXY_LOG_LEVEL}
     "$<$<CONFIG:Debug>:"
         "_DEBUG;"
         #"_WINDOWS;"

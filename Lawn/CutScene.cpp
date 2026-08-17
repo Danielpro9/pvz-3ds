@@ -1637,6 +1637,13 @@ void CutScene::UpdateZombiesWon()
 	// 食脑的动画及惨叫的音效
 	if (mCutsceneTime == LostTimeBrainGraphicStart)
 	{
+#ifdef LOW_MEMORY
+		// Same rationale as Board::PlayerLoses's ZOMBIES_WON load: the board
+		// is at its heaviest here and this definition is never preloaded
+		// under LOW_MEMORY, so reclaim unreferenced assets before the
+		// on-demand load right below.
+		mApp->PurgeUnusedAssets();
+#endif
 		ReanimatorEnsureDefinitionLoaded(ReanimationType::REANIM_ZOMBIES_WON, true);
 		int aRenderPosition = Board::MakeRenderOrder(RenderLayer::RENDER_LAYER_SCREEN_FADE, 0, 0);
 		Reanimation* aReanimation = mApp->AddReanimation(-BOARD_OFFSET, 0, aRenderPosition, ReanimationType::REANIM_ZOMBIES_WON);
@@ -1924,6 +1931,9 @@ void CutScene::ClearUpsellBoard()
 	
 	mBoard->mZombies.DataArrayFreeAll();
 	mBoard->mPlants.DataArrayFreeAll();
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	mBoard->InvalidatePlantGridCache();
+#endif
 	mBoard->mCoins.DataArrayFreeAll();
 	mBoard->mProjectiles.DataArrayFreeAll();
 	mBoard->mGridItems.DataArrayFreeAll();

@@ -4,7 +4,7 @@
 #include "Widget.h"
 #include "misc/Debug.h"
 #include <algorithm>
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 #include "../../Sexy.TodLib/TodDebug.h"
 
 extern SexyString (*gGetCurrentLevelName)();
@@ -490,7 +490,7 @@ void WidgetContainer::Update()
 void WidgetContainer::UpdateAll(ModalFlags* theFlags)
 {
 	AutoModalFlags anAutoModalFlags(theFlags, mWidgetFlagsMod);
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 	static int sRootGameSelectorFrameLogs = 0;
 	bool aLogRootGameSelector = mParent == NULL && Ps2IsGameSelectorScene() && sRootGameSelectorFrameLogs < 6;
 	if (aLogRootGameSelector)
@@ -525,7 +525,7 @@ void WidgetContainer::UpdateAll(ModalFlags* theFlags)
 		mUpdateIteratorModified = false;
 
 		Widget* aWidget = *mUpdateIterator;
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 		if (aLogRootGameSelector)
 		{
 			TodHesitationTrace(
@@ -544,7 +544,7 @@ void WidgetContainer::UpdateAll(ModalFlags* theFlags)
 			theFlags->mIsOver = true;
 
 		aWidget->UpdateAll(theFlags);
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 		if (aLogRootGameSelector)
 			TodHesitationTrace("WCU child end idx=%d ptr=%p", aPs2ChildIndex, aWidget);
 		aPs2ChildIndex++;
@@ -555,7 +555,7 @@ void WidgetContainer::UpdateAll(ModalFlags* theFlags)
 	}
 
 	mUpdateIteratorModified = true; // prevent incrementing iterator off the end of the list
-#ifdef PS2_PLATFORM
+#if defined(PS2_PLATFORM) && SEXY_LOG_LEVEL >= 2
 	if (aLogRootGameSelector)
 		TodHesitationTrace("WCU root end frame=%d", sRootGameSelectorFrameLogs - 1);
 #endif
@@ -618,9 +618,16 @@ void WidgetContainer::DrawAll(ModalFlags* theFlags, Graphics* g)
 	
 	if (theFlags->GetFlags() & WIDGETFLAGS_DRAW)
 	{
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+		GraphicsState aDrawState;
+		aDrawState.CopyStateFrom(g);
+		Draw(g);
+		g->CopyStateFrom(&aDrawState);
+#else
 		g->PushState();
 		Draw(g);
 		g->PopState();
+#endif
 	}
 
 	WidgetList::iterator anItr = mWidgets.begin();

@@ -7,16 +7,17 @@
 #include <sys/stat.h>
 #include "TodDebug.h"
 #include "Definition.h"
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#include "DefinitionStreaming.h"
+#endif
 #include "zlib.h"
 #include "paklib/PakInterface.h"
 #include "misc/PerfTimer.h"
 #include "misc/XMLParser.h"
 #include "misc/BigBlockArena.h"
+#include "misc/PlatformIoLock.h"
 #include "../Resources.h"
 #if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
-#ifdef PS2_PLATFORM
-#include "Ps2IoLock.h"
-#endif
 #include <new>
 #endif
 DefSymbol gTrailFlagDefSymbols[] = {  //0x69E150
@@ -616,18 +617,14 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
 {
     PerfTimer aTimer;
     aTimer.Start();
-#ifdef PS2_PLATFORM
-    // Raw stdio hits SIF RPC directly; serialize against the pad-poll thread.
-    Ps2IoLockAcquire();
-#endif
+    // Some console IO backends require serialized file access.
+    PlatformIoLockAcquire();
     // Through the pak layer, not raw stdio: compiled defs ship inside main.pak,
     // which raw fopen can't see (it only finds loose files).
     PFILE* pFile = p_fopen(theCompiledFilePath.c_str(), "rb");
     if (!pFile)
     {
-#ifdef PS2_PLATFORM
-        Ps2IoLockRelease();
-#endif
+        PlatformIoLockRelease();
         return false;
     }
 
@@ -648,9 +645,7 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
     // 读取文件，并判断实际读取的大小是否为完整的文件大小，若不等则判断为读取失败
     bool aReadCompressedFailed = p_fread(aCompressedBuffer, sizeof(char), aCompressedSize, pFile) != aCompressedSize;
     p_fclose(pFile);  // 关闭资源文件流并释放 pFile 占用的内存
-#ifdef PS2_PLATFORM
-    Ps2IoLockRelease();
-#endif
+    PlatformIoLockRelease();
     if (aReadCompressedFailed) { // 判断是否读取成功
         TodTrace(__S("Failed to read compiled file: %s\n"), theCompiledFilePath.c_str());
 #if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
@@ -662,6 +657,19 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
         return false;
     }
 
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+    const bool aResult = DefinitionReadCompiledStream(aCompressedBuffer,
+        aCompressedSize, theDefMap, theDefinition);
+    if (!aScratchOwnsCompressedBuffer)
+        delete[] (char *)aCompressedBuffer;
+    if (!aResult)
+    {
+        TodTrace(__S("Compiled file streaming read failed: %s\n"),
+            theCompiledFilePath.c_str());
+        return false;
+    }
+    return true;
+#else
     size_t aUncompressedSize;
 #if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
     CompressedDefinitionHeader* aCompressedHeader = (CompressedDefinitionHeader*)aCompressedBuffer;
@@ -732,6 +740,7 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
         return false;
     }
     return aResult;
+#endif
 }
 
 //0x444770
@@ -760,9 +769,9 @@ bool DefinitionIsCompiled(const SexyString& theXMLFilePath)
     struct stat attr;
 
 #ifdef PS2_PLATFORM
-    Ps2IoLockAcquire();
+    PlatformIoLockAcquire();
     int aCompiledStat = stat(aCompiledFilePath.c_str(), &attr);
-    Ps2IoLockRelease();
+    PlatformIoLockRelease();
     if (aCompiledStat != 0)
         return false;
     // PS2 runtime builds must not recompile XML definitions on the console:
@@ -777,9 +786,9 @@ bool DefinitionIsCompiled(const SexyString& theXMLFilePath)
     time_t aCompiledFileTime = attr.st_mtime;
 
 #ifdef PS2_PLATFORM
-    Ps2IoLockAcquire();
+    PlatformIoLockAcquire();
     int aXMLStat = stat(theXMLFilePath.c_str(), &attr);
-    Ps2IoLockRelease();
+    PlatformIoLockRelease();
     if (aXMLStat != 0)
 #else
     if (stat(theXMLFilePath.c_str(), &attr) != 0)
@@ -1433,10 +1442,8 @@ bool DefinitionWriteCompiledFile(const SexyString& theCompiledFilePath, DefMap* 
     delete[] (uint *)aDefBasePtr; // already compressed, no need to keep this instance alive
 
     std::string aFilePath = GetFileDir(theCompiledFilePath);
-#ifdef PS2_PLATFORM
-    // MkDir + raw stdio write hit SIF RPC; serialize against the pad-poll thread.
-    Ps2IoLockAcquire();
-#endif
+    // Serialize file creation on backends whose IO service is not thread-safe.
+    PlatformIoLockAcquire();
     MkDir(aFilePath);
 
     auto aFileStream = fopen(theCompiledFilePath.c_str(), "wb");
@@ -1446,14 +1453,10 @@ bool DefinitionWriteCompiledFile(const SexyString& theCompiledFilePath, DefMap* 
         delete[] (char *)aCompressedDef;
 
         fclose(aFileStream);
-#ifdef PS2_PLATFORM
-        Ps2IoLockRelease();
-#endif
+        PlatformIoLockRelease();
         return aBytesWritten == aCompressedSize;
     }
-#ifdef PS2_PLATFORM
-    Ps2IoLockRelease();
-#endif
+    PlatformIoLockRelease();
 
     delete[] (char *)aCompressedDef;
     return false;
@@ -1524,6 +1527,11 @@ float FloatTrackEvaluate(FloatParameterTrack& theTrack, float theTimeValue, floa
 {
     if (theTrack.mCountNodes == 0)
         return 0.0f;
+
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+    if (theTrack.mCountNodes == 1 && theTrack.mNodes[0].mLowValue == theTrack.mNodes[0].mHighValue)
+        return theTrack.mNodes[0].mLowValue;
+#endif
 
     if (theTimeValue < theTrack.mNodes[0].mTime)  // 如果当前时间小于第一个节点的开始时间
         return TodCurveEvaluate(theInterp, theTrack.mNodes[0].mLowValue, theTrack.mNodes[0].mHighValue, theTrack.mNodes[0].mDistribution);

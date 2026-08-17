@@ -4,6 +4,7 @@
 #include <sifrpc.h>
 #include <gsKit.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <sys/stat.h>
 #include <malloc.h>
 #include <pthread.h>
@@ -17,6 +18,7 @@
 #include "Ps2PvzServices.h"
 #include "Ps2Trace.h"
 #include "Ps2BigArena.h"
+#include "Ps2CrashHandler.h"
 
 using namespace Sexy;
 
@@ -185,11 +187,44 @@ extern "C" int Ps2BigOwns(const void* thePtr)
 
 extern "C" void Ps2BigFree(void* thePtr)
 {
+    if (thePtr == NULL)
+        return;
+
+    pthread_once(&sBigOnce, Ps2BigInit);
+    bool aValidBlock = false;
+    bool aDoubleFree = false;
     pthread_mutex_lock(&sBigLock);
-    Ps2BigBlock* aBlock = (Ps2BigBlock*)((unsigned char*)thePtr - sizeof(Ps2BigBlock));
-    aBlock->mFree = 1;
-    sBigUsed -= aBlock->mSize;
+    Ps2BigBlock* aBlock = (Ps2BigBlock*)sBigArena;
+    while (Ps2BigInRange(aBlock) && aBlock->mMagic == PS2_BIG_MAGIC)
+    {
+        void* aPayload = (unsigned char*)aBlock + sizeof(Ps2BigBlock);
+        if (aPayload == thePtr)
+        {
+            aValidBlock = true;
+            aDoubleFree = aBlock->mFree != 0;
+            if (!aDoubleFree)
+            {
+                aBlock->mFree = 1;
+                sBigUsed -= aBlock->mSize;
+            }
+            break;
+        }
+
+        uintptr_t aNext = (uintptr_t)aBlock + sizeof(Ps2BigBlock) + aBlock->mSize;
+        uintptr_t aArenaEnd = (uintptr_t)sBigArena + PS2_BIG_ARENA_BYTES;
+        if (aNext <= (uintptr_t)aBlock || aNext >= aArenaEnd)
+            break;
+        aBlock = (Ps2BigBlock*)aNext;
+    }
     pthread_mutex_unlock(&sBigLock);
+
+    if (!aValidBlock || aDoubleFree)
+    {
+        char aLine[112];
+        snprintf(aLine, sizeof(aLine), "[BIG] invalid free ptr=%p%s\n",
+            thePtr, aDoubleFree ? " (double free)" : "");
+        TodForceAppendToDebugLog(aLine);
+    }
 }
 
 extern "C" unsigned int Ps2BigUsedBytes(void)
@@ -288,7 +323,7 @@ extern "C" void* __wrap__Znaj(unsigned int theSize)
     return Ps2NewWithRescue(theSize, __real__Znaj, __builtin_return_address(0));
 }
 
-// Definition of the gsGlobal pointer shared with gles_ps2.cpp, Window.cpp and Input.cpp.
+// Definition of the gsGlobal pointer shared by the native GS renderer, Window.cpp and Input.cpp.
 GSGLOBAL* gsGlobal = nullptr;
 
 // Function-pointer globals declared extern in LawnApp.h; defined here for PS2
@@ -360,6 +395,12 @@ int main(int argc, char** argv)
 
     std::set_terminate(Ps2TerminateHandler);
 
+    // Before anything else can fault: set_terminate above only catches C++
+    // exceptions, and a bad pointer never becomes one. This claims the EE's
+    // memory-fault vectors so the faulting PC reaches the screen instead of
+    // leaving a frozen picture with no information.
+    Ps2CrashHandlerInstall();
+
     // The kernel hands the ELF's main thread priority 0 — the highest on the
     // EE, above the audio mixer thread (20, Ps2SoundManager). A CPU-bound
     // gameplay frame at priority 0 never yields, so the mixer crawls to ~1
@@ -377,7 +418,8 @@ int main(int argc, char** argv)
     // IOP modules (memory card, USB mass storage, cdfs, audsrv) + save location
     // + asset read root.
     Ps2PvzInitServices(aArgv0);
-    Sexy::SetAppDataFolder(Ps2GetSavePrefix());
+    if (Ps2GetSavePrefix()[0] != '\0')
+        Sexy::SetAppDataFolder(Ps2GetSavePrefix());
     Ps2Trace(PS2_TRACE_BOOT_IOP);
 
     EnsureBlankTga();

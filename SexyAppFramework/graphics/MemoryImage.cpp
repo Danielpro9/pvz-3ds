@@ -66,7 +66,7 @@ MemoryImage::MemoryImage(const MemoryImage& theMemoryImage) :
 	MemoryImage* aNonConstMemoryImage = (MemoryImage*) &theMemoryImage;
 
 	if ((theMemoryImage.mBits == NULL) && (theMemoryImage.mColorTable == NULL)
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 		&& (theMemoryImage.mRGBBits == NULL)
 #endif
 		)
@@ -85,7 +85,7 @@ MemoryImage::MemoryImage(const MemoryImage& theMemoryImage) :
 	else
 		mBits = NULL;
 
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 	if (theMemoryImage.mRGBBits != NULL)
 	{
 		mRGBBits = new uchar[mWidth*mHeight*3];
@@ -160,7 +160,7 @@ MemoryImage::~MemoryImage()
 	mApp->RemoveMemoryImage(this);
 	
 	delete [] mBits;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 	delete [] mRGBBits;
 #endif
 	delete [] mNativeAlphaData;	
@@ -175,7 +175,7 @@ void MemoryImage::Init()
 	mBits = NULL;
 	mColorTable = NULL;
 	mColorIndices = NULL;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 	mRGBBits = NULL;
 #endif
 
@@ -893,7 +893,7 @@ void MemoryImage::CommitBits()
 					mHasAlpha = true;
 			}
 		}
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 		else if (mRGBBits != NULL)
 		{
 			mHasTrans = false;
@@ -1173,7 +1173,7 @@ void MemoryImage::PurgeBits()
 	else
 	{
 		if ((mBits == NULL) && (mColorIndices == NULL)
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 			&& (mRGBBits == NULL)
 #endif
 			)
@@ -1184,7 +1184,7 @@ void MemoryImage::PurgeBits()
 	
 	delete [] mBits;
 	mBits = NULL;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 	if (mD3DData != NULL)
 	{
 		delete [] mRGBBits;
@@ -1205,7 +1205,7 @@ void MemoryImage::PurgeBits()
 void MemoryImage::DeleteSWBuffers()
 {
 	if ((mBits == NULL) && (mColorIndices == NULL)
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 		&& (mRGBBits == NULL)
 #endif
 		)
@@ -1245,7 +1245,7 @@ void MemoryImage::ReInit()
 void MemoryImage::DeleteNativeData()
 {
 	if ((mBits == NULL) && (mColorIndices == NULL)
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 		&& (mRGBBits == NULL)
 #endif
 		)
@@ -1262,7 +1262,7 @@ void MemoryImage::SetBits(uint32_t* theBits, int theWidth, int theHeight, bool c
 {	
 	if (theBits != mBits)
 	{
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 		delete [] mRGBBits;
 		mRGBBits = NULL;
 #endif
@@ -1297,7 +1297,7 @@ void MemoryImage::SetCompactBits(uint32_t* theColorTable, uchar* theColorIndices
 	mColorTable = NULL;
 	delete [] mColorIndices;
 	mColorIndices = NULL;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 	delete [] mRGBBits;
 	mRGBBits = NULL;
 #else
@@ -1326,7 +1326,7 @@ void MemoryImage::SetCompactBits(uint32_t* theColorTable, uchar* theColorIndices
 			mColorIndices = NULL;
 		}
 	}
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 	else if (theRGBBits != NULL)
 	{
 		mRGBBits = new uchar[mWidth * mHeight * 3];
@@ -1350,7 +1350,7 @@ void MemoryImage::AdoptCompactBits(uint32_t* theColorTable, uchar* theColorIndic
 	mColorTable = NULL;
 	delete [] mColorIndices;
 	mColorIndices = NULL;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 	delete [] mRGBBits;
 	mRGBBits = NULL;
 #endif
@@ -1362,7 +1362,7 @@ void MemoryImage::AdoptCompactBits(uint32_t* theColorTable, uchar* theColorIndic
 		mColorTable = theColorTable;
 		mColorIndices = theColorIndices;
 	}
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 	else if (theRGBBits != NULL)
 	{
 		mRGBBits = theRGBBits;
@@ -1388,7 +1388,7 @@ void MemoryImage::Create(int theWidth, int theHeight)
 {
 	delete [] mBits;
 	mBits = NULL;
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 	delete [] mRGBBits;
 	mRGBBits = NULL;
 #endif
@@ -1453,7 +1453,7 @@ uint32_t* MemoryImage::GetBits()
 #endif
 		mBits[aSize] = MEMORYCHECK_ID;
 
-#ifdef PS2_PLATFORM
+#ifdef SEXY_COMPACT_RGB_IMAGES
 		if (mRGBBits != NULL)
 		{
 			uchar* src = mRGBBits;
