@@ -57,6 +57,7 @@ void Ps2BigFree(void* thePtr);
 
 /* Bytes currently allocated out of the arena (diagnostics). */
 unsigned int Ps2BigUsedBytes(void);
+unsigned int Ps2BigLargestFreeBytes(void);
 
 #else /* !PS2_PLATFORM */
 
@@ -64,6 +65,7 @@ static inline void* Ps2BigAlloc(unsigned int theSize) { (void)theSize; return 0;
 static inline int Ps2BigOwns(const void* thePtr) { (void)thePtr; return 0; }
 static inline void Ps2BigFree(void* thePtr) { (void)thePtr; }
 static inline unsigned int Ps2BigUsedBytes(void) { return 0; }
+static inline unsigned int Ps2BigLargestFreeBytes(void) { return 0; }
 
 #endif
 

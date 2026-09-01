@@ -1643,6 +1643,10 @@ void GLInterface::Flush()
 
 bool GLInterface::CreateImageTexture(MemoryImage *theImage)
 {
+	// Track actual texture use so low-memory consoles can evict cold GPU data.
+	if (theImage->mApp != NULL)
+		theImage->mLastTextureUseCount = theImage->mApp->mUpdateCount;
+
 	// Re-evaluate this on every attempt.  Previously it was captured only
 	// while allocating TextureData, so a failed first upload both purged the
 	// only CPU copy and prevented a later successful retry from purging it.

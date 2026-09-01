@@ -43,6 +43,7 @@
 #include "platform/wii/sound/WiiSoundManager.h"
 #include "platform/wii/WiiEarlyInit.h"
 #include "platform/wii/WiiHeap.h"
+#include "misc/GraphicsBlockArena.h"
 #include <malloc.h>
 #include <gccore.h>
 #else
@@ -5954,6 +5955,66 @@ bool SexyAppBase::PurgeLazyImage(MemoryImage* theImage, bool theKeepTexture)
 	return true;
 }
 
+int SexyAppBase::PurgeColdLazyTextures(int theMinUnusedUpdates, int theMaxTextures, size_t theTargetLargestFreeBytes)
+{
+	if (theMaxTextures <= 0)
+		return 0;
+
+	// Remove3DData mutates the render backend texture tables; only do this on
+	// the primary/render thread, exactly like the full lazy-image purge.
+	if ((mPrimaryThreadId != 0) && ((void*)pthread_self() != mPrimaryThreadId))
+		return 0;
+
+	AutoCrit anAutoCrit(mGLInterface->mCritSect);
+	PlatformIoLockAcquire();
+
+	int aPurged = 0;
+	while (aPurged < theMaxTextures)
+	{
+#ifdef WII_PLATFORM
+		if (theTargetLargestFreeBytes != 0 &&
+			ConsoleGraphicsLargestFreeBytes() >= theTargetLargestFreeBytes)
+			break;
+#else
+		(void)theTargetLargestFreeBytes;
+#endif
+
+		MemoryImage* anOldest = NULL;
+		int anOldestUse = mUpdateCount;
+		for (MemoryImageSet::iterator anItr = mMemoryImageSet.begin(); anItr != mMemoryImageSet.end(); ++anItr)
+		{
+			MemoryImage* anImage = *anItr;
+			if (anImage == NULL || anImage->mD3DData == NULL || anImage->mLazyPinned || anImage->mFilePath.empty())
+				continue;
+
+			const int anUnusedFor = mUpdateCount - anImage->mLastTextureUseCount;
+			if (anUnusedFor < theMinUnusedUpdates)
+				continue;
+
+			if (anOldest == NULL || anImage->mLastTextureUseCount < anOldestUse)
+			{
+				anOldest = anImage;
+				anOldestUse = anImage->mLastTextureUseCount;
+			}
+		}
+
+		if (anOldest == NULL)
+			break;
+
+		if (!PurgeLazyImage(anOldest, false))
+		{
+			// Runtime-dirty/non-reloadable images are not purge candidates. Move
+			// them out of this pass without changing their actual texture state.
+			anOldest->mLastTextureUseCount = mUpdateCount;
+			continue;
+		}
+		aPurged++;
+	}
+
+	PlatformIoLockRelease();
+	return aPurged;
+}
+
 void SexyAppBase::PurgeLazyImages()
 {
 	// Texture teardown mutates the GL shim's texture table and the VRAM
@@ -6145,6 +6206,7 @@ int SexyAppBase::PurgeLazyImageBits(bool theForce)
 bool SexyAppBase::LoadLazyImageBits(MemoryImage*) { return false; }
 bool SexyAppBase::PurgeLazyImage(MemoryImage*, bool) { return false; }
 void SexyAppBase::PurgeLazyImages() { }
+int SexyAppBase::PurgeColdLazyTextures(int, int, size_t) { return 0; }
 bool SexyAppBase::IsHeapUnderPressure() { return false; }
 int SexyAppBase::PurgeLazyImageBits(bool) { return 0; }
 #endif

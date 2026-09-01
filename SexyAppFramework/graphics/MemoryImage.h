@@ -59,6 +59,7 @@ public:
 	bool					mLazyPinned;
 	int						mLazyCleanCount;
 	DWORD					mLazyRestoreD3DFlags;
+	int						mLastTextureUseCount;
 	// Recipe for an explicit resources.xml alpha companion (alphaimage= /
 	// alphagrid=). LoadLazyImageBits re-applies it after every re-decode, so
 	// these images stay purgeable; without the recipe they had to be

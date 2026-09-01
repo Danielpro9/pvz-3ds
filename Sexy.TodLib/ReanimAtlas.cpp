@@ -4,6 +4,7 @@
 #include "ReanimAtlas.h"
 #include "misc/PerfTimer.h"
 #include "misc/GraphicsBlockArena.h"
+#include "misc/BigBlockArena.h"
 #include "graphics/MemoryImage.h"
 #ifdef PS2_PLATFORM
 #include <new>
@@ -63,29 +64,22 @@ ReanimAtlasImage* ReanimAtlas::GetEncodedReanimAtlas(Image* theImage)
 MemoryImage* ReanimAtlasMakeBlankMemoryImage(int theWidth, int theHeight)
 {
 	MemoryImage* aImage = new MemoryImage();
-
 	int aBitsCount = theWidth * theHeight;
-#ifdef PS2_PLATFORM
-	// The heap runs within ~2MB of its ceiling during loading; a plain new
-	// here aborts (no exceptions) and reads as a hard freeze. Shed purgeable
-	// image bits and retry before giving up.
-	aImage->mBits = new (std::nothrow) uint32_t[aBitsCount + 1];
-	if (aImage->mBits == NULL)
+
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+	// Atlas pixels are transient construction data. Keep them out of both the
+	// small-object heap and Wii's texture arena: the console scratch pool is
+	// reserved early and reuses 256/512/1024KB size classes without creating
+	// new holes in the general heap. If it cannot serve the surface, the
+	// caller falls back to the already-supported un-atlased draw path.
+	aImage->mBits = static_cast<uint32_t*>(ConsoleScratchAlloc((aBitsCount + 1) * sizeof(uint32_t)));
+	if (aImage->mBits == nullptr)
 	{
-		printf("[ATLAS] OOM on %dx%d atlas bits, purging and retrying...\n", theWidth, theHeight);
-		gSexyAppBase->PurgeLazyImageBits(true);
-		aImage->mBits = new (std::nothrow) uint32_t[aBitsCount + 1];
+		printf("[ATLAS] scratch unavailable for %dx%d (%uKB); using un-atlased path\n",
+			theWidth, theHeight, (unsigned)(((aBitsCount + 1) * sizeof(uint32_t)) / 1024));
+		delete aImage;
+		return nullptr;
 	}
-	if (aImage->mBits == NULL)
-	{
-		gSexyAppBase->PurgeLazyImages();
-		aImage->mBits = new (std::nothrow) uint32_t[aBitsCount + 1];
-	}
-	TOD_ASSERT(aImage->mBits != NULL);
-#elif defined(WII_PLATFORM)
-	aImage->mBits = static_cast<uint32_t*>(ConsoleGraphicsAlloc((aBitsCount + 1) * sizeof(uint32_t)));
-	if (aImage->mBits == NULL)
-		aImage->mBits = new uint32_t[aBitsCount + 1];
 #else
 	aImage->mBits = new uint32_t[aBitsCount + 1];
 #endif
@@ -299,7 +293,7 @@ void ReanimAtlas::RebuildImageHash()
 #endif
 
 //0x470680
-void ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
+bool ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
 {
 	PerfTimer aTimer;
 	aTimer.Start();
@@ -358,7 +352,7 @@ void ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
 #ifdef PS2_PLATFORM
 		printf("[ATLAS] no images; skipping atlas surface\n");
 #endif
-		return;
+		return true;
 	}
 #endif
 
@@ -375,6 +369,13 @@ void ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
 		aAtlasWidth, aAtlasHeight,
 		(double)aAtlasWidth * aAtlasHeight * 4.0 / (1024.0 * 1024.0));
 #endif
+
+	// Allocate before replacing any definition Image* with atlas indices. A
+	// failed scratch reservation can therefore abandon this atlas atomically
+	// and leave the definition fully valid for direct-image rendering.
+	mMemoryImage = ReanimAtlasMakeBlankMemoryImage(aAtlasWidth, aAtlasHeight);
+	if (mMemoryImage == nullptr)
+		return false;
 
 	for (int aTrackIndex = 0; aTrackIndex < theReanimDef->mTracks.count; aTrackIndex++)
 	{
@@ -405,10 +406,6 @@ void ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
 	}
 
 #ifdef PS2_PLATFORM
-	printf("[ATLAS] allocating blank image %dx%d...\n", aAtlasWidth, aAtlasHeight);
-#endif
-	mMemoryImage = ReanimAtlasMakeBlankMemoryImage(aAtlasWidth, aAtlasHeight);
-#ifdef PS2_PLATFORM
 	printf("[ATLAS] drawing %d images into atlas...\n", mImageCount);
 #endif
 	Graphics aMemoryGraphis(mMemoryImage);
@@ -424,4 +421,5 @@ void ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
 #ifdef PS2_PLATFORM
 	printf("[ATLAS] done\n");
 #endif
+	return true;
 }

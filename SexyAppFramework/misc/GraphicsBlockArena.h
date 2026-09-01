@@ -14,6 +14,7 @@ void   ConsoleGraphicsFree(void* thePtr);
 int    ConsoleGraphicsOwns(const void* thePtr);
 size_t ConsoleGraphicsUsedBytes(void);
 size_t ConsoleGraphicsLargestFreeBytes(void);
+void   ConsoleGraphicsCompactFreeBlocks(void);
 
 #ifdef __cplusplus
 }

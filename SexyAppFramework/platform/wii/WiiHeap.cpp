@@ -15,6 +15,7 @@
 
 #include "wii/WiiEarlyInit.h"
 #include "misc/GraphicsBlockArena.h"
+#include "misc/BigBlockArena.h"
 #include "SexyAppBase.h" // gSexyAppBase, for the allocation-failure purge rescue
 
 // Defined in opengx/src/call_lists.c. Forward-declared rather than reached via
@@ -184,6 +185,8 @@ void operator delete(void *ptr) noexcept
 {
 	if (ConsoleGraphicsOwns(ptr))
 		ConsoleGraphicsFree(ptr);
+	else if (ConsoleBigBlockOwns(ptr))
+		ConsoleBigBlockFree(ptr);
 	else
 		std::free(ptr);
 }

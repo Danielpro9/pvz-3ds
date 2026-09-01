@@ -59,6 +59,7 @@ MemoryImage::MemoryImage(const MemoryImage& theMemoryImage) :
 	mLazyPinned = true;
 	mLazyCleanCount = 0;
 	mLazyRestoreD3DFlags = 0;
+	mLastTextureUseCount = theMemoryImage.mLastTextureUseCount;
 	mLazyAlphaRows = 1;
 	mLazyAlphaCols = 1;
 	bool aSourceWasLazy = theMemoryImage.mLazyUnloaded;
@@ -199,6 +200,7 @@ void MemoryImage::Init()
 	mLazyPinned = false;
 	mLazyCleanCount = 0;
 	mLazyRestoreD3DFlags = 0;
+	mLastTextureUseCount = 0;
 	mLazyAlphaRows = 1;
 	mLazyAlphaCols = 1;
 

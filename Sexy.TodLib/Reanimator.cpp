@@ -11,6 +11,10 @@
 #include "graphics/Font.h"
 #include "misc/PerfTimer.h"
 #include "graphics/MemoryImage.h"
+#include "misc/BigBlockArena.h"
+#ifdef WII_PLATFORM
+#include "misc/GraphicsBlockArena.h"
+#endif
 #if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +25,7 @@
 #ifdef PS2_PLATFORM
 #include <pthread.h>
 #include "graphics/GLInterface.h"
+#include "platform/ps2/Ps2PvzServices.h"
 #endif
 
 #ifdef PS2_PLATFORM
@@ -496,12 +501,48 @@ void ReanimationCreateAtlas(ReanimatorDefinition* theDefinition, ReanimationType
 	if (theDefinition->mReanimAtlas != nullptr || TestBit(aParam.mReanimParamFlags, ReanimFlags::REANIM_NO_ATLAS))
 		return;  // 当动画已存在 Atlas 或无需 Atlas 时，直接退出
 
+#ifdef WII_PLATFORM
+	// Runtime reanimation atlases are generated surfaces with no file backing.
+	// Their construction pixels now use the console scratch pool, but the final
+	// Wii texture still needs contiguous graphics-arena space. Drawing without
+	// an atlas is already supported, so avoid creating another persistent atlas
+	// when the texture arena is too fragmented to make it worthwhile.
+	const size_t aLargestGraphicsBlock = ConsoleGraphicsLargestFreeBytes();
+	if (aLargestGraphicsBlock != 0 && aLargestGraphicsBlock < (2u << 20))
+	{
+		static unsigned int sAtlasSkipCount = 0;
+		sAtlasSkipCount++;
+		if (sAtlasSkipCount <= 8 || (sAtlasSkipCount & (sAtlasSkipCount - 1)) == 0)
+			printf("[WII][ATLAS] skip under pressure: largest=%uKB type=%d count=%u\n",
+				(unsigned)(aLargestGraphicsBlock / 1024), (int)theReanimationType, sAtlasSkipCount);
+		return;
+	}
+#endif
+
+#ifdef PS2_PLATFORM
+	// PS2 has the same direct-image fallback, but its pressure signal comes
+	// from the EE heap and reserved big-block pool rather than Wii/MEM2.
+	if (Ps2ShouldPurgeAssets() && ConsoleBigBlockLargestFreeBytes() < (512u << 10))
+	{
+		static unsigned int sPs2AtlasSkipCount = 0;
+		sPs2AtlasSkipCount++;
+		if (sPs2AtlasSkipCount <= 8 || (sPs2AtlasSkipCount & (sPs2AtlasSkipCount - 1)) == 0)
+			printf("[PS2][ATLAS] skip under pressure: bigLargest=%uKB type=%d count=%u\n",
+				(unsigned)(ConsoleBigBlockLargestFreeBytes() / 1024), (int)theReanimationType, sPs2AtlasSkipCount);
+		return;
+	}
+#endif
+
 	PerfTimer aTimer;
 	aTimer.Start();
 	TodHesitationTrace("preatlas");
 	ReanimAtlas* aAtlas = new ReanimAtlas();
+	if (!aAtlas->ReanimAtlasCreate(theDefinition))
+	{
+		delete aAtlas;
+		return;
+	}
 	theDefinition->mReanimAtlas = aAtlas;  // 赋值动画 Atlas 指针
-	aAtlas->ReanimAtlasCreate(theDefinition);
 
 #ifdef LOW_MEMORY
 	// The atlas just copied every source part into its own surface; the
@@ -1644,11 +1685,29 @@ void ReanimatorFreeUnusedDefinitions(const std::vector<bool>* theOnlyTypes)
 		aFreedImages.erase(aImage);
 
 #ifdef SEXY_LAZY_IMAGES
-	// Keep the Image object shells: their pixel payload is what matters and
-	// PurgeLazyImages already reclaims it (definition images load through the
-	// lazy machinery), so deleting the objects only recovers ~200B shells —
-	// while being the one step here that can leave a dangling Image* for a
-	// draw to trip on later (same lesson as the credits bits-only eviction).
+	// Keep the Image object shells, but evict the payload/texture of source
+	// images that became orphaned when their last reanimation definition was
+	// freed.  Keeping the shell is important: particle definitions and other
+	// long-lived data can retain the Image* even though no loaded reanimation
+	// definition references it.  PurgeLazyImage(..., false) is safe for those
+	// stale pointers because a future draw faults the same shell back in.
+	//
+	// This is also what makes mid-level collection useful on LOW_MEMORY
+	// consoles.  Previously ReanimationFreeDefinition released its atlas, but
+	// every lazily loaded source texture stayed resident until a screen-level
+	// PurgeLazyImages().  FINAL_BOSS continuously introduces zombie types with
+	// no screen transition, so the Wii graphics arena eventually filled even
+	// though the zombies using many of those definitions were already dead.
+	int aPurgedSources = 0;
+	for (Image* aImage : aFreedImages)
+	{
+		MemoryImage* aMemoryImage = static_cast<MemoryImage*>(aImage);
+		if (gSexyAppBase->PurgeLazyImage(aMemoryImage, false))
+			aPurgedSources++;
+	}
+
+	// Keep the Image object shells: deleting the objects only recovers ~200B
+	// each while being the one step here that can leave a dangling Image*.
 	// Suspected in the 2026-07-18 TLB crash inside TextureData::CreateTextures,
 	// where a pointer was stomped with "…ean…" string bytes (freed block
 	// reused by a path string).
@@ -1668,7 +1727,8 @@ void ReanimatorFreeUnusedDefinitions(const std::vector<bool>* theOnlyTypes)
 	// reference, and nothing else. A TodEmitterDefinition holding the same
 	// Image* in mImage is invisible to it, so a particle emitter can outlive
 	// the image it draws with.
-	TodTrace("freed %d reanim defs, kept %d source image shells", aFreedCount, (int)aFreedImages.size());
+	TodTrace("freed %d reanim defs, purged %d/%d orphan source images (shells kept)",
+		aFreedCount, aPurgedSources, (int)aFreedImages.size());
 #else
 	int aDeletedImages = ((TodResourceManager*)gSexyAppBase->mResourceManager)->DeleteUngroupedImages(aFreedImages);
 	gSexyAppBase->CleanSharedImages();

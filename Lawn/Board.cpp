@@ -7,6 +7,7 @@
 #include "Widget/LawnDialog.h"
 #include "System/PlayerInfo.h"
 #include "System/PoolEffect.h"
+#include "System/ReanimationLawn.h"
 #include "System/PopDRMComm.h"
 #include "System/TypingCheck.h"
 #include "Widget/StoreScreen.h"
@@ -36,7 +37,6 @@
 #if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
 #include <stdint.h>
 #endif
-
 #ifdef PS2_PLATFORM
 #include "../SexyAppFramework/platform/ps2/Ps2BigArena.h"
 #include "../SexyAppFramework/platform/ps2/Ps2RenderStats.h"
@@ -6034,6 +6034,13 @@ void Board::UpdateGame()
 		return;
 
 	mMainCounter++;
+
+#if defined(LOW_MEMORY) && (defined(PS2_PLATFORM) || defined(WII_PLATFORM))
+	// Keep gameplay free of platform/memory policy. LawnApp decides how often
+	// to inspect pressure and how aggressively to collect for this level.
+	mApp->UpdateRuntimeMemoryMaintenance(mMainCounter);
+#endif
+
 	UpdateSunSpawning();
 	UpdateZombieSpawning();
 	UpdateIce();

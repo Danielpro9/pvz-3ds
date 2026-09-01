@@ -165,6 +165,9 @@ public:
 #ifdef LOW_MEMORY
 	void							PurgeUnusedAssets(bool theForce = false);
 	bool							ShouldPurgeAssets();
+	bool							IsRuntimeMemoryUnderPressure();
+	void							PurgeRuntimeAssets();
+	void							UpdateRuntimeMemoryMaintenance(int theMainCounter);
 #endif
 	void							MakeNewBoard();
 	void							StartPlaying();

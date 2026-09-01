@@ -124,57 +124,77 @@ static inline bool Ps2BigInRange(const void* thePtr)
         && (const unsigned char*)thePtr < sBigArena + PS2_BIG_ARENA_BYTES;
 }
 
-extern "C" void* Ps2BigAlloc(unsigned int theSize)
+static inline unsigned int Ps2BigPooledSize(unsigned int theSize)
 {
-    if (theSize == 0 || theSize > PS2_BIG_ARENA_BYTES - sizeof(Ps2BigBlock))
-        return NULL;
-    pthread_once(&sBigOnce, Ps2BigInit);
-    unsigned int aNeed = (theSize + PS2_BIG_ALIGN - 1) & ~(PS2_BIG_ALIGN - 1);
+    unsigned int aSize = (theSize + PS2_BIG_ALIGN - 1) & ~(PS2_BIG_ALIGN - 1);
+    if (aSize >= (192u << 10) && aSize <= (256u << 10)) return 256u << 10;
+    if (aSize >= (384u << 10) && aSize <= (512u << 10)) return 512u << 10;
+    if (aSize >= (768u << 10) && aSize <= (1u << 20)) return 1u << 20;
+    return aSize;
+}
 
-    void* aPtr = NULL;
-    pthread_mutex_lock(&sBigLock);
+static void Ps2BigCoalesceLocked(void)
+{
     Ps2BigBlock* aBlock = (Ps2BigBlock*)sBigArena;
-    while (Ps2BigInRange(aBlock))
+    while (Ps2BigInRange(aBlock) && aBlock->mMagic == PS2_BIG_MAGIC)
     {
-        if (aBlock->mMagic != PS2_BIG_MAGIC)
-        {
-            // A payload overran into the next header (or an interior free
-            // scribbled one). Name it and stop trusting the list — callers
-            // fall back to malloc, and the log points at the culprit window.
-            char aLine[96];
-            snprintf(aLine, sizeof(aLine), "[BIG] header corrupto en +%u — walk abortado\n",
-                     (unsigned)((unsigned char*)aBlock - sBigArena));
-            TodForceAppendToDebugLog(aLine);
-            break;
-        }
         if (aBlock->mFree)
         {
-            // Coalesce the free run ahead before testing the fit.
             Ps2BigBlock* aNext = Ps2BigNext(aBlock);
             while (Ps2BigInRange(aNext) && aNext->mMagic == PS2_BIG_MAGIC && aNext->mFree)
             {
                 aBlock->mSize += sizeof(Ps2BigBlock) + aNext->mSize;
                 aNext = Ps2BigNext(aBlock);
             }
-            if (aBlock->mSize >= aNeed)
-            {
-                if (aBlock->mSize >= aNeed + sizeof(Ps2BigBlock) + PS2_BIG_ALIGN)
-                {
-                    // Split: remainder becomes its own free block.
-                    Ps2BigBlock* aRest =
-                        (Ps2BigBlock*)((unsigned char*)aBlock + sizeof(Ps2BigBlock) + aNeed);
-                    aRest->mSize = aBlock->mSize - aNeed - sizeof(Ps2BigBlock);
-                    aRest->mFree = 1;
-                    aRest->mMagic = PS2_BIG_MAGIC;
-                    aBlock->mSize = aNeed;
-                }
-                aBlock->mFree = 0;
-                sBigUsed += aBlock->mSize;
-                aPtr = (unsigned char*)aBlock + sizeof(Ps2BigBlock);
-                break;
-            }
         }
         aBlock = Ps2BigNext(aBlock);
+    }
+}
+
+extern "C" void* Ps2BigAlloc(unsigned int theSize)
+{
+    if (theSize == 0 || theSize > PS2_BIG_ARENA_BYTES - sizeof(Ps2BigBlock))
+        return NULL;
+    pthread_once(&sBigOnce, Ps2BigInit);
+    unsigned int aNeed = Ps2BigPooledSize(theSize);
+
+    void* aPtr = NULL;
+    pthread_mutex_lock(&sBigLock);
+    Ps2BigCoalesceLocked();
+    Ps2BigBlock* aBest = NULL;
+    Ps2BigBlock* aBlock = (Ps2BigBlock*)sBigArena;
+    while (Ps2BigInRange(aBlock))
+    {
+        if (aBlock->mMagic != PS2_BIG_MAGIC)
+        {
+            char aLine[96];
+            snprintf(aLine, sizeof(aLine), "[BIG] header corrupto en +%u — walk abortado\n",
+                     (unsigned)((unsigned char*)aBlock - sBigArena));
+            TodForceAppendToDebugLog(aLine);
+            break;
+        }
+        if (aBlock->mFree && aBlock->mSize >= aNeed &&
+            (aBest == NULL || aBlock->mSize < aBest->mSize))
+        {
+            aBest = aBlock;
+        }
+        aBlock = Ps2BigNext(aBlock);
+    }
+
+    if (aBest != NULL)
+    {
+        if (aBest->mSize >= aNeed + sizeof(Ps2BigBlock) + PS2_BIG_ALIGN)
+        {
+            Ps2BigBlock* aRest =
+                (Ps2BigBlock*)((unsigned char*)aBest + sizeof(Ps2BigBlock) + aNeed);
+            aRest->mSize = aBest->mSize - aNeed - sizeof(Ps2BigBlock);
+            aRest->mFree = 1;
+            aRest->mMagic = PS2_BIG_MAGIC;
+            aBest->mSize = aNeed;
+        }
+        aBest->mFree = 0;
+        sBigUsed += aBest->mSize;
+        aPtr = (unsigned char*)aBest + sizeof(Ps2BigBlock);
     }
     pthread_mutex_unlock(&sBigLock);
     return aPtr;
@@ -206,6 +226,7 @@ extern "C" void Ps2BigFree(void* thePtr)
             {
                 aBlock->mFree = 1;
                 sBigUsed -= aBlock->mSize;
+                Ps2BigCoalesceLocked();
             }
             break;
         }
@@ -230,6 +251,23 @@ extern "C" void Ps2BigFree(void* thePtr)
 extern "C" unsigned int Ps2BigUsedBytes(void)
 {
     return sBigUsed;
+}
+
+extern "C" unsigned int Ps2BigLargestFreeBytes(void)
+{
+    pthread_once(&sBigOnce, Ps2BigInit);
+    unsigned int aLargest = 0;
+    pthread_mutex_lock(&sBigLock);
+    Ps2BigCoalesceLocked();
+    Ps2BigBlock* aBlock = (Ps2BigBlock*)sBigArena;
+    while (Ps2BigInRange(aBlock) && aBlock->mMagic == PS2_BIG_MAGIC)
+    {
+        if (aBlock->mFree && aBlock->mSize > aLargest)
+            aLargest = aBlock->mSize;
+        aBlock = Ps2BigNext(aBlock);
+    }
+    pthread_mutex_unlock(&sBigLock);
+    return aLargest;
 }
 
 // Linked with -Wl,--wrap=free (CMakeLists): arena pointers must never reach

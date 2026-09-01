@@ -19,6 +19,9 @@ void  ConsoleBigBlockFree(void* thePtr);
 int   ConsoleBigBlockOwns(const void* thePtr);
 size_t ConsoleBigBlockUsedBytes(void);
 size_t ConsoleBigBlockLargestFreeBytes(void);
+void* ConsoleScratchAlloc(size_t theSize);
+void  ConsoleScratchFree(void* thePtr);
+int   ConsoleScratchOwns(const void* thePtr);
 
 #ifdef __cplusplus
 }

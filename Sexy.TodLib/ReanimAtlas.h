@@ -42,7 +42,7 @@ public:
 public:
     ReanimAtlas();
 
-    void                            ReanimAtlasCreate(ReanimatorDefinition* theReanimDef);
+    bool                            ReanimAtlasCreate(ReanimatorDefinition* theReanimDef);
     void                            ReanimAtlasDispose();
     /*inline*/ void                 AddImage(Image* theImage);
     /*inline*/ int                  FindImage(Image* theImage);

@@ -458,6 +458,7 @@ public:
 	bool					LoadLazyImageBits(MemoryImage* theImage);
 	bool					PurgeLazyImage(MemoryImage* theImage, bool theKeepTexture);
 	void					PurgeLazyImages();
+	int						PurgeColdLazyTextures(int theMinUnusedUpdates, int theMaxTextures, size_t theTargetLargestFreeBytes = 0);
 	bool					IsHeapUnderPressure();
 	int						PurgeLazyImageBits(bool theForce = false);
 	void					PrecacheAdditive(MemoryImage* theImage);

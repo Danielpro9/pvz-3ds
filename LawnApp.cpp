@@ -50,6 +50,9 @@
 #include "platform/ps2/Ps2PvzServices.h"  // Ps2PvzServices helpers
 #include "platform/ps2/Ps2Trace.h"        // Ps2Trace / Ps2TraceBeat (startup tracer)
 #endif
+#ifdef WII_PLATFORM
+#include "SexyAppFramework/misc/GraphicsBlockArena.h"
+#endif
 
 #include "widget/Checkbox.h"
 #include "widget/Dialog.h"
@@ -369,9 +372,9 @@ void LawnApp::KillBoard()
 
 #ifdef LOW_MEMORY
 // Purging everything at every transition forced a mass re-decode of images
-// and sounds right after (visible as a burst of hitches). The heap ceiling is
-// ~26MB (32MB minus the ELF image and stacks), so while actual usage is low
-// it is cheaper to keep decoded assets resident and skip the purge entirely.
+// and sounds right after (visible as a burst of hitches). Keep the
+// platform-specific pressure policy here so gameplay code never needs to
+// know about MEM2, the Wii graphics arena, mallinfo(), or PS2 heap limits.
 bool LawnApp::ShouldPurgeAssets()
 {
 #ifdef PS2_PLATFORM
@@ -381,17 +384,95 @@ bool LawnApp::ShouldPurgeAssets()
 #endif
 }
 
-// Frees every asset that nothing alive is using: reanim definitions without a
-// live Reanimation (plus their orphaned source images), the pre-rendered
-// ReanimatorCache frames, and the decoded pixels of lazy images. Everything
-// reloads transparently on next use, so this is safe at any screen
-// transition where a heavy screen (board, almanac, store) was just torn down.
-// theForce bypasses the "skip if not under pressure yet" heuristic below: the
-// credits load (~35 atlases + 6 backgrounds, the heaviest in the game, see
-// CreditScreen::PreLoadCredits) can't afford to walk in with whatever the
-// previous screen left resident just because the heap happened to be under
-// 18MB at the moment of transition — a hitch here is free, the load screen
-// is already multi-second regardless.
+// Runtime levels need a stricter policy than screen transitions. In
+// particular FINAL_BOSS is long-lived and streams many zombie reanimations
+// without destroying the Board in between.
+bool LawnApp::IsRuntimeMemoryUnderPressure()
+{
+	if (IsHeapUnderPressure())
+		return true;
+
+#ifdef PS2_PLATFORM
+	if (Ps2ShouldPurgeAssets())
+		return true;
+#endif
+
+#ifdef WII_PLATFORM
+	// The texture shim uses a dedicated RAM arena that is invisible to the
+	// normal heap-pressure heuristic. Reclaim before fragmentation makes a
+	// medium atlas impossible to place.
+	const size_t aLargestGraphicsBlock = ConsoleGraphicsLargestFreeBytes();
+	if (aLargestGraphicsBlock != 0 && aLargestGraphicsBlock < (2u << 20))
+		return true;
+#endif
+
+	return false;
+}
+
+static void LawnPurgeUnusedReanimationAssets(LawnApp* theApp)
+{
+	if (theApp->mReanimatorCache != nullptr)
+		theApp->mReanimatorCache->ReanimatorCachePurge();
+	ReanimatorFreeUnusedDefinitions();
+}
+
+// Lightweight in-level collector. It deliberately keeps Image objects and
+// live textures that are still referenced. ReanimatorFreeUnusedDefinitions
+// releases orphan source textures, while lazy CPU-side image bits are cheap
+// and transparently reloadable.
+void LawnApp::PurgeRuntimeAssets()
+{
+#ifdef WII_PLATFORM
+	const size_t aGraphicsBefore = ConsoleGraphicsUsedBytes();
+	const size_t aLargestBefore = ConsoleGraphicsLargestFreeBytes();
+#endif
+
+	LawnPurgeUnusedReanimationAssets(this);
+
+#ifdef WII_PLATFORM
+	// Dead reanimation definitions release their atlases, but a long boss
+	// level can still retain reloadable source textures long after their last
+	// draw. Evict only cold textures and cap the work per sweep.
+	int aColdPurged = 0;
+	if (ConsoleGraphicsLargestFreeBytes() < (2u << 20))
+		aColdPurged = PurgeColdLazyTextures(500, 12, 4u << 20);
+	ConsoleGraphicsCompactFreeBlocks();
+
+	const size_t aGraphicsAfter = ConsoleGraphicsUsedBytes();
+	const size_t aLargestAfter = ConsoleGraphicsLargestFreeBytes();
+	printf("[WII][GC] cold=%d gfx=%uKB->%uKB largest=%uKB->%uKB\n",
+		aColdPurged,
+		(unsigned)(aGraphicsBefore / 1024), (unsigned)(aGraphicsAfter / 1024),
+		(unsigned)(aLargestBefore / 1024), (unsigned)(aLargestAfter / 1024));
+#elif defined(PS2_PLATFORM)
+	// Same LRU policy on PS2, with a smaller batch to avoid upload bursts.
+	PurgeColdLazyTextures(500, 8, 0);
+#endif
+
+	// Pressure was already established; CPU-side bits are independently
+	// reloadable and can be reclaimed in the same maintenance pass.
+	PurgeLazyImageBits(true);
+}
+
+// In-level maintenance policy for low-memory consoles. Normal levels only
+// inspect pressure occasionally, so stable stages pay effectively no GC cost.
+// FINAL_BOSS streams many zombie/reanimation assets and therefore checks more
+// frequently. The collector itself still runs only when pressure is detected.
+void LawnApp::UpdateRuntimeMemoryMaintenance(int theMainCounter)
+{
+	const int aCheckInterval = IsFinalBossLevel() ? 200 : 600;
+	if (theMainCounter <= 0 || (theMainCounter % aCheckInterval) != 0)
+		return;
+
+	if (!IsRuntimeMemoryUnderPressure())
+		return;
+
+	PurgeRuntimeAssets();
+}
+
+// Full transition collector. This can be more aggressive because the heavy
+// screen/board that owned the discarded assets has already been torn down.
+// theForce bypasses the transition pressure heuristic.
 void LawnApp::PurgeUnusedAssets(bool theForce)
 {
 	if (!theForce && !ShouldPurgeAssets())
@@ -399,9 +480,8 @@ void LawnApp::PurgeUnusedAssets(bool theForce)
 		TodTrace("purge skipped: heap under pressure threshold");
 		return;
 	}
-	if (mReanimatorCache != nullptr)
-		mReanimatorCache->ReanimatorCachePurge();
-	ReanimatorFreeUnusedDefinitions();
+
+	LawnPurgeUnusedReanimationAssets(this);
 	PurgeLazyImages();
 }
 #endif
