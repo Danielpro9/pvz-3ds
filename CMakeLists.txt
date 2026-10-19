@@ -175,10 +175,16 @@ elseif(NINTENDO_3DS)
 	# Textures are stored at 1/2^shift resolution, invisible to game layout
 	# (same idea as PS2_GS_TEXTURE_SHRINK_SHIFT). Old 3DS halves them like PS2,
 	# New 3DS keeps the full resolution like Wii.
+	# Linear heap: the GPU-visible part of app memory (textures, vertex and
+	# command buffers, framebuffers); libctru gives the rest to the regular heap.
+	# Its default of up to 32 MB left ~27 MB of it unused on the first New 3DS
+	# run while the regular heap ran out. Read "linear free" on the top screen.
 	if(PVZ_3DS_PROFILE STREQUAL "NEW3DS")
 		set(CTR_TEXTURE_SHRINK_SHIFT 0)
+		set(CTR_LINEAR_HEAP_MB 24)
 	else()
 		set(CTR_TEXTURE_SHRINK_SHIFT 1)
+		set(CTR_LINEAR_HEAP_MB 12)
 	endif()
 
 	set(NO_GLEW ON)
@@ -300,6 +306,7 @@ if (NINTENDO_3DS)
 	target_compile_definitions(re-plants-vs-zombies PRIVATE
 		PVZ_3DS_PROFILE_${PVZ_3DS_PROFILE}
 		CTR_TEXTURE_SHRINK_SHIFT=${CTR_TEXTURE_SHRINK_SHIFT}
+		CTR_LINEAR_HEAP_MB=${CTR_LINEAR_HEAP_MB}
 	)
 	target_compile_options(re-plants-vs-zombies PRIVATE -include SDL.h)
 	# The 3DS toolchain only adds libctru's headers by default; the portlibs

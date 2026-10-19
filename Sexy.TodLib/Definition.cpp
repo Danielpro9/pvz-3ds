@@ -7,7 +7,7 @@
 #include <sys/stat.h>
 #include "TodDebug.h"
 #include "Definition.h"
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 #include "DefinitionStreaming.h"
 #endif
 #include "zlib.h"
@@ -17,7 +17,7 @@
 #include "misc/BigBlockArena.h"
 #include "misc/PlatformIoLock.h"
 #include "../Resources.h"
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 #include <new>
 #endif
 DefSymbol gTrailFlagDefSymbols[] = {  //0x69E150
@@ -317,7 +317,7 @@ unsigned int DefinitionGetSize(DefMap* theDefMap, void* theDefinition) {
 
 void* DefinitionAlloc(int theSize)
 {
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     // A throwing new here is a silent console freeze, so allocate nothrow
     // first and give large transient definition buffers one cleanup retry.
     // Big staging blobs can still die to fragmentation alone: the Award
@@ -343,7 +343,7 @@ void* DefinitionAlloc(int theSize)
     }
     if (aPtr == NULL)
         printf("[DEF] OOM allocating %d bytes\n", theSize);
-#ifdef WII_PLATFORM
+#if defined(WII_PLATFORM) || defined(__3DS__)
     // Preserve Wii's normal fatal path (including requested-size/caller
     // diagnostics) if the cleanup could not produce a contiguous block.
     if (aPtr == NULL)
@@ -631,7 +631,7 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
     p_fseek(pFile, 0, 2);  // 将读取位置的指针移动至文件末尾
     size_t aCompressedSize = p_ftell(pFile);  // 此时获取到的偏移量即为整个文件的大小
     p_fseek(pFile, 0, 0);  // 再把读取位置的指针移回文件开头
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     // The compressed input is transient too. Keeping it on the general heap
     // left a 1.19 MB contiguous allocation exposed to fragmentation before
     // the uncompressed scratch buffer was even created.
@@ -648,7 +648,7 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
     PlatformIoLockRelease();
     if (aReadCompressedFailed) { // 判断是否读取成功
         TodTrace(__S("Failed to read compiled file: %s\n"), theCompiledFilePath.c_str());
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
         if (!aScratchOwnsCompressedBuffer)
             delete[] (char *)aCompressedBuffer;
 #else
@@ -657,7 +657,7 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
         return false;
     }
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     const bool aResult = DefinitionReadCompiledStream(aCompressedBuffer,
         aCompressedSize, theDefMap, theDefinition);
     if (!aScratchOwnsCompressedBuffer)
@@ -671,7 +671,7 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
     return true;
 #else
     size_t aUncompressedSize;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     CompressedDefinitionHeader* aCompressedHeader = (CompressedDefinitionHeader*)aCompressedBuffer;
     size_t aScratchSize = aCompressedSize >= sizeof(CompressedDefinitionHeader) &&
         aCompressedHeader->mCookie == 0xDEADFED4L
@@ -684,7 +684,7 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
 #else
     void* aUncompressedBuffer = DefinitionUncompressCompiledBuffer(aCompressedBuffer, aCompressedSize, aUncompressedSize, theCompiledFilePath);
 #endif
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     if (!aScratchOwnsCompressedBuffer)
         delete[] (char *)aCompressedBuffer;
 #else
@@ -696,7 +696,7 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
     uint aDefHash = DefinitionCalcHash(theDefMap);  // 计算 CRC 校验值，后将用于检测数据的完整性
     if (aUncompressedSize < theDefMap->mDefSize + sizeof(uint)) {
         TodTrace(__S("Compiled file size too small: %s\n"), theCompiledFilePath.c_str());
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
         if (!aScratchOwnsUncompressedBuffer)
             delete[] (char *)aUncompressedBuffer;
 #else
@@ -712,7 +712,7 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
     SMemR(aBufferPtr, &aCashHash, sizeof(uint));  // 读取记录的 CRC 校验值
     if (aCashHash != aDefHash) {
         TodTrace(__S("Compiled file schema wrong: %s\n"), theCompiledFilePath.c_str());
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
         if (!aScratchOwnsUncompressedBuffer)
             delete[] (char *)aUncompressedBuffer;
 #else
@@ -729,7 +729,7 @@ bool DefinitionReadCompiledFile(const SexyString& theCompiledFilePath, DefMap* t
     // 修复野指针及标志型数据，并保存是否成功的结果，后续作为返回值
     bool aResult = DefMapReadFromCache(aBufferPtr, theDefMap, theDefinition);
     size_t aReadMemSize = (uintptr_t)aBufferPtr - (uintptr_t)aUncompressedBuffer;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     if (!aScratchOwnsUncompressedBuffer)
         delete[] (char *)aUncompressedBuffer;
 #else
@@ -794,7 +794,7 @@ bool DefinitionIsCompiled(const SexyString& theXMLFilePath)
     if (stat(theXMLFilePath.c_str(), &attr) != 0)
 #endif
     {
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
         // On console the source XML normally ships inside the pak, so stat() on
         // the loose filesystem fails and there is no mtime to compare against.
         // The pak is immutable between runs, so a compiled file already present
@@ -1528,7 +1528,7 @@ float FloatTrackEvaluate(FloatParameterTrack& theTrack, float theTimeValue, floa
     if (theTrack.mCountNodes == 0)
         return 0.0f;
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     if (theTrack.mCountNodes == 1 && theTrack.mNodes[0].mLowValue == theTrack.mNodes[0].mHighValue)
         return theTrack.mNodes[0].mLowValue;
 #endif

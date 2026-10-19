@@ -1521,7 +1521,7 @@ void Plant::UpdateSquash()
             }
 
             mState = PlantState::STATE_SQUASH_RISING;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
             if (mBoard)
                 mBoard->InvalidatePlantGridCache();
 #endif
@@ -2371,7 +2371,7 @@ void Plant::Squish()
 
     mRenderOrder = Board::MakeRenderOrder(RenderLayer::RENDER_LAYER_GRAVE_STONE, mRow, 8);
     mSquished = true;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     if (mBoard)
         mBoard->InvalidatePlantGridCache();
 #endif
@@ -5020,7 +5020,7 @@ void Plant::Die()
     }
 
     mDead = true;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     if (mBoard)
         mBoard->InvalidatePlantGridCache();
 #endif

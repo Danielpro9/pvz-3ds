@@ -534,6 +534,13 @@ void TextureData::CreateTextures(MemoryImage *theImage)
 {
 	theImage->DeleteSWBuffers(); // don't need these buffers for 3d drawing
 
+#ifdef SEXY_LAZY_IMAGES
+	// A lazy stub is marked as having alpha until it is decoded; decode it
+	// first so opaque images get R5G6B5 below instead of twice that as RGBA8.
+	if (theImage->mLazyUnloaded)
+		gSexyAppBase->LoadLazyImageBits(theImage);
+#endif
+
 	// Choose appropriate pixel format
 	PixelFormat aFormat = PixelFormat_A8R8G8B8;
 	//theImage->mD3DFlags = D3DImageFlag_UseA4R4G4B4;

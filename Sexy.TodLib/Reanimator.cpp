@@ -15,7 +15,7 @@
 #ifdef WII_PLATFORM
 #include "misc/GraphicsBlockArena.h"
 #endif
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 #include <cstdlib>
 #include <cstring>
 #endif
@@ -52,7 +52,7 @@ ReanimatorDefinition* gReanimatorDefArray;   //[0x6A9EE8]
 unsigned int gReanimationParamArraySize;              //[0x6A9EEC]
 ReanimationParams* gReanimationParamArray;   //[0x6A9EF0]
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 struct ReanimatorAttacherCache
 {
 	const char* mSourceText;
@@ -337,7 +337,7 @@ bool ReanimationLoadDefinition(const SexyString& theFileName, ReanimatorDefiniti
 		}
 	}
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	for (int aTrackIndex = 0; aTrackIndex < theDefinition->mTracks.count; aTrackIndex++)
 	{
 		ReanimatorTrack* aTrack = &theDefinition->mTracks.tracks[aTrackIndex];
@@ -362,7 +362,7 @@ bool ReanimationLoadDefinition(const SexyString& theFileName, ReanimatorDefiniti
 //0x4717D0
 void ReanimationFreeDefinition(ReanimatorDefinition* theDefinition)
 {
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	ReanimatorInvalidateBasePoseCache(theDefinition);
 	for (unsigned int aCacheIndex = 0; aCacheIndex < REANIMATOR_ATTACHER_CACHE_SIZE; aCacheIndex++)
 	{
@@ -557,7 +557,7 @@ void ReanimationCreateAtlas(ReanimatorDefinition* theDefinition, ReanimationType
 
 	if (aAtlas->mMemoryImage != nullptr)
 	{
-#ifdef WII_PLATFORM
+#if defined(WII_PLATFORM) || defined(__3DS__)
 		// The Almanac first draws a live Sunflower/Zombie on its index page,
 		// then builds the small selector thumbnails in software from the same
 		// atlas. Wii/OpenGX has no glGetTexImage: purging the atlas after that
@@ -732,7 +732,7 @@ void Reanimation::Update()
 		}
 	}
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	ReanimatorFrameTime aUpdateFrameTime;
 	if (mDefinition->mTracks.count > 0)
 		GetFrameTime(&aUpdateFrameTime);
@@ -750,7 +750,7 @@ void Reanimation::Update()
 			aTrack->mShakeY = RandRangeFloat(-aTrack->mShakeOverride, aTrack->mShakeOverride);
 		}
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 		bool aIsAttacher = strncasecmp(mDefinition->mTracks.tracks[aTrackIndex].mName, "attacher__", 10) == 0;
 		bool aNeedsTransform = aIsAttacher || aTrack->mAttachmentID != AttachmentID::ATTACHMENTID_NULL;
 		ReanimatorTransform aTransform;
@@ -816,7 +816,7 @@ void Reanimation::GetCurrentTransform(int theTrackIndex, ReanimatorTransform* th
 {
 	ReanimatorFrameTime aFrameTime;
 	GetFrameTime(&aFrameTime);
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	GetCurrentTransformAtTime(theTrackIndex, theTransformCurrent, &aFrameTime);
 #else
 	GetTransformAtTime(theTrackIndex, theTransformCurrent, &aFrameTime);  // 结合两帧之间的自然补间取得基础变换
@@ -830,7 +830,7 @@ void Reanimation::GetCurrentTransform(int theTrackIndex, ReanimatorTransform* th
 #endif
 }
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 void Reanimation::GetCurrentTransformAtTime(int theTrackIndex, ReanimatorTransform* theTransformCurrent, ReanimatorFrameTime* theFrameTime)
 {
 	GetTransformAtTime(theTrackIndex, theTransformCurrent, theFrameTime);
@@ -873,7 +873,7 @@ void Reanimation::GetTransformAtTime(int theTrackIndex, ReanimatorTransform* the
 //0x4720F0
 void Reanimation::MatrixFromTransform(const ReanimatorTransform& theTransform, SexyMatrix3& theMatrix)
 {
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	if (theTransform.mSkewX == 0.0f && theTransform.mSkewY == 0.0f)
 	{
 		theMatrix.m00 = theTransform.mScaleX;
@@ -958,7 +958,7 @@ void Reanimation::ReanimBltMatrix(Graphics* g, Image* theImage, SexyMatrix3& the
 
 //0x4723B0
 // GOTY @Patoke: 0x4769B0
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 bool Reanimation::DrawTrackAtTime(Graphics* g, int theTrackIndex, int theRenderGroup, TodTriangleGroup* theTriangleGroup, ReanimatorFrameTime* theFrameTime)
 #else
 bool Reanimation::DrawTrack(Graphics* g, int theTrackIndex, int theRenderGroup, TodTriangleGroup* theTriangleGroup)
@@ -967,7 +967,7 @@ bool Reanimation::DrawTrack(Graphics* g, int theTrackIndex, int theRenderGroup, 
 	(void)theRenderGroup;
 	ReanimatorTransform aTransform;
 	ReanimatorTrackInstance* aTrackInstance = &mTrackInstances[theTrackIndex];  // 目标轨道的指针
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	if (theFrameTime != nullptr)
 		GetCurrentTransformAtTime(theTrackIndex, &aTransform, theFrameTime);
 	else
@@ -1210,7 +1210,7 @@ void Reanimation::GetFrameTime(ReanimatorFrameTime* theFrameTime)
 	TOD_ASSERT(theFrameTime->mAnimFrameBeforeInt >= 0 && theFrameTime->mAnimFrameAfterInt < mDefinition->mTracks.tracks[0].mTransforms.count);
 }
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 bool Reanimation::DrawTrack(Graphics* g, int theTrackIndex, int theRenderGroup, TodTriangleGroup* theTriangleGroup)
 {
 	return DrawTrackAtTime(g, theTrackIndex, theRenderGroup, theTriangleGroup, nullptr);
@@ -1224,7 +1224,7 @@ void Reanimation::DrawRenderGroup(Graphics* g, int theRenderGroup)
 		return;
 
 	TodTriangleGroup aTriangleGroup;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	ReanimatorFrameTime aFrameTime;
 	bool aFrameTimeReady = false;
 #endif
@@ -1233,7 +1233,7 @@ void Reanimation::DrawRenderGroup(Graphics* g, int theRenderGroup)
 		ReanimatorTrackInstance* aTrackInstance = &mTrackInstances[aTrackIndex];
 		if (aTrackInstance->mRenderGroup == theRenderGroup)
 		{
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 			if (!aFrameTimeReady)
 			{
 				GetFrameTime(&aFrameTime);
@@ -1323,14 +1323,14 @@ AttachEffect* Reanimation::AttachParticleToTrack(const char* theTrackName, TodPa
 
 //0x473110
 // GOTY @Patoke: 0x477810
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 void Reanimation::GetAttachmentOverlayMatrix(int theTrackIndex, SexyTransform2D& theOverlayMatrix, const ReanimatorTransform* theTransformOverride)
 #else
 void Reanimation::GetAttachmentOverlayMatrix(int theTrackIndex, SexyTransform2D& theOverlayMatrix)
 #endif
 {
 	ReanimatorTransform aTransformStorage;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	const ReanimatorTransform* aTransform = theTransformOverride;
 	if (aTransform == nullptr)
 	{
@@ -1347,7 +1347,7 @@ void Reanimation::GetAttachmentOverlayMatrix(int theTrackIndex, SexyTransform2D&
 	SexyMatrix3Multiply(aTransformMatrix, mOverlayMatrix, aTransformMatrix);  // 以动画覆写矩阵作用于动画变换矩阵
 
 	SexyTransform2D aBasePoseMatrixInv;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	ReanimatorGetBasePoseInverseCached(this, theTrackIndex, aBasePoseMatrixInv);
 #else
 	SexyTransform2D aBasePoseMatrix;
@@ -1843,7 +1843,7 @@ void Reanimation::PlayReanim(const char* theTrackName, ReanimLoopType theLoopTyp
 	SetFramesForLayer(theTrackName);
 }
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 static bool ReanimatorSpanEquals(const char* theText, unsigned short theTextLength, const char* theExpected)
 {
 	size_t aExpectedLength = strlen(theExpected);
@@ -2074,13 +2074,13 @@ void Reanimation::ParseAttacherTrack(const ReanimatorTransform& theTransform, At
 }
 
 //0x473EB0
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 void Reanimation::AttacherSynchWalkSpeed(int theTrackIndex, Reanimation* theAttachReanim)
 #else
 void Reanimation::AttacherSynchWalkSpeed(int theTrackIndex, Reanimation* theAttachReanim, AttacherInfo& theAttacherInfo)
 #endif
 {
-#if !defined(PS2_PLATFORM) && !defined(WII_PLATFORM)
+#if !defined(PS2_PLATFORM) && !defined(WII_PLATFORM) && !defined(__3DS__)
 	(void)theAttacherInfo;
 #endif
 	ReanimatorTrack* aTrack = &mDefinition->mTracks.tracks[theTrackIndex];
@@ -2134,7 +2134,7 @@ void Reanimation::AttacherSynchWalkSpeed(int theTrackIndex, Reanimation* theAtta
 }
 
 //0x4740B0
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 void Reanimation::UpdateAttacherTrack(int theTrackIndex, const ReanimatorTransform* theTransformOverride)
 #else
 void Reanimation::UpdateAttacherTrack(int theTrackIndex)
@@ -2142,7 +2142,7 @@ void Reanimation::UpdateAttacherTrack(int theTrackIndex)
 {
 	ReanimatorTrackInstance* aTrackInstance = &mTrackInstances[theTrackIndex];
 	ReanimatorTransform aTransformStorage;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	const ReanimatorTransform* aTransformPtr = theTransformOverride;
 	if (aTransformPtr == nullptr)
 	{
@@ -2155,7 +2155,7 @@ void Reanimation::UpdateAttacherTrack(int theTrackIndex)
 	const ReanimatorTransform& aTransform = aTransformStorage;
 #endif
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	ReanimatorAttacherCache& aAttacherInfo = ReanimatorGetAttacherCached(aTransform);
 	ReanimationType aReanimationType = aTransform.mFrame == -1.0f ? ReanimationType::REANIM_NONE : aAttacherInfo.mReanimationType;
 #else
@@ -2189,7 +2189,7 @@ void Reanimation::UpdateAttacherTrack(int theTrackIndex)
 	{
 		AttachmentDie(aTrackInstance->mAttachmentID);  // 清除原有附件
 		aAttachReanim = gEffectSystem->mReanimationHolder->AllocReanimation(0.0f, 0.0f, 0, aReanimationType);  // 重新创建一个指定的动画
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 		aAttachReanim->mLoopType = (ReanimLoopType)aAttacherInfo.mLoopType;
 		aAttachReanim->mAnimRate = aAttacherInfo.mAnimRate;
 #else
@@ -2200,7 +2200,7 @@ void Reanimation::UpdateAttacherTrack(int theTrackIndex)
 		mFrameBasePose = NO_BASE_POSE;  // 设定附属动画后，自身不再存在基准帧
 	}
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	if (aAttacherInfo.mTrackNameLength != 0)  // 如果定义了附属动画的动作轨道
 	{
 		int aAnimFrameStart, aAnimFrameCount;

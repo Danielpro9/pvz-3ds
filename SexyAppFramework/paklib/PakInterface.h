@@ -37,7 +37,7 @@ public:
 	//HANDLE					mMappingHandle;
 	void*						mDataPtr;				//+0x8：资源包中的所有数据
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	// On PS2, the pak is NOT loaded into RAM. Each PFILE opened against this
 	// collection gets its own FILE* handle so reads are position-independent.
 	// mPakPath remembers the on-disk path so FOpen can re-open it on demand.
@@ -58,7 +58,7 @@ struct PFILE
 	PakRecord*				mRecord;
 	int						mPos;
 	FILE*					mFP;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	// PS2: to avoid a per-byte SIF RPC storm (the XML parser reads pak records
 	// one char at a time via FGetC->FRead), each pak-record PFILE reads its whole
 	// decrypted record into this buffer once at FOpen and then serves reads from

@@ -74,7 +74,7 @@ public:
         if (mpAllocator == nullptr)
             mpAllocator = FindGlobalAllocator(sizeof(TodListNode<T>));
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
         TodListNode<T>* aNode = (TodListNode<T>*)mpAllocator->Alloc(sizeof(TodListNode<T>));
 #else
         TodListNode<T>* aNode = (TodListNode<T>*)mpAllocator->Calloc(sizeof(TodListNode<T>));
@@ -96,7 +96,7 @@ public:
         if (mpAllocator == nullptr)
             mpAllocator = FindGlobalAllocator(sizeof(TodListNode<T>));
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
         TodListNode<T>* aNode = (TodListNode<T>*)mpAllocator->Alloc(sizeof(TodListNode<T>));
 #else
         TodListNode<T>* aNode = (TodListNode<T>*)mpAllocator->Calloc(sizeof(TodListNode<T>));

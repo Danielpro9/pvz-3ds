@@ -1,6 +1,6 @@
 #include "DefinitionStreamDecoder.h"
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 
 #include "Definition.h"
 #include "DefinitionStreamReader.h"

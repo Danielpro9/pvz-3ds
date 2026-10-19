@@ -31,7 +31,7 @@ static void Ps2IoLockRelease(void) {}
 //                 single reanim take ~20 seconds.
 //
 // On all of these a single failing direct fopen per miss is cheap and correct.
-#if !defined(_WIN32) && !defined(PS2_PLATFORM) && !defined(WII_PLATFORM)
+#if !defined(_WIN32) && !defined(PS2_PLATFORM) && !defined(WII_PLATFORM) && !defined(__3DS__)
 	#define FCASEOPEN_USE_CASEPATH 1
 #else
 	#define FCASEOPEN_USE_CASEPATH 0

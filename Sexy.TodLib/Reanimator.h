@@ -220,7 +220,7 @@ public:
     void                            DrawRenderGroup(Graphics* g, int theRenderGroup);
     bool                            DrawTrack(Graphics* g, int theTrackIndex, int theRenderGroup, TodTriangleGroup* theTriangleGroup);
     void                            GetCurrentTransform(int theTrackIndex, ReanimatorTransform* theTransformCurrent);
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     bool                            DrawTrackAtTime(Graphics* g, int theTrackIndex, int theRenderGroup, TodTriangleGroup* theTriangleGroup, ReanimatorFrameTime* theFrameTime);
     void                            GetCurrentTransformAtTime(int theTrackIndex, ReanimatorTransform* theTransformCurrent, ReanimatorFrameTime* theFrameTime);
 #endif
@@ -228,7 +228,7 @@ public:
     void                            GetFrameTime(ReanimatorFrameTime* theFrameTime);
     int                             FindTrackIndex(const char* theTrackName);
     void                            AttachToAnotherReanimation(Reanimation* theAttachReanim, const char* theTrackName);
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     void                            GetAttachmentOverlayMatrix(int theTrackIndex, SexyTransform2D& theOverlayMatrix, const ReanimatorTransform* theTransformOverride = nullptr);
 #else
     void                            GetAttachmentOverlayMatrix(int theTrackIndex, SexyTransform2D& theOverlayMatrix);
@@ -259,13 +259,13 @@ public:
     void                            ReanimationDelete();
     ReanimatorTrackInstance*        GetTrackInstanceByName(const char* theTrackName);
     void                            GetFramesForLayer(const char* theTrackName, int& theFrameStart, int& theFrameCount);
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     void                            UpdateAttacherTrack(int theTrackIndex, const ReanimatorTransform* theTransformOverride = nullptr);
 #else
     void                            UpdateAttacherTrack(int theTrackIndex);
 #endif
     static void                     ParseAttacherTrack(const ReanimatorTransform& theTransform, AttacherInfo& theAttacherInfo);
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     void                            AttacherSynchWalkSpeed(int theTrackIndex, Reanimation* theAttachReanim);
 #else
     void                            AttacherSynchWalkSpeed(int theTrackIndex, Reanimation* theAttachReanim, AttacherInfo& theAttacherInfo);

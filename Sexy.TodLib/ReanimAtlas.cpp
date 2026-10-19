@@ -66,7 +66,7 @@ MemoryImage* ReanimAtlasMakeBlankMemoryImage(int theWidth, int theHeight)
 	MemoryImage* aImage = new MemoryImage();
 	int aBitsCount = theWidth * theHeight;
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	// Atlas pixels are transient construction data. Keep them out of both the
 	// small-object heap and Wii's texture arena: the console scratch pool is
 	// reserved early and reuses 256/512/1024KB size classes without creating
@@ -298,7 +298,7 @@ bool ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
 	PerfTimer aTimer;
 	aTimer.Start();
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	printf("[ATLAS] create begin: %d tracks\n", theReanimDef->mTracks.count);
 	// One atlas surface is one contiguous heap allocation, built at whatever
 	// moment a reanimation of this type is first needed — often mid-
@@ -326,7 +326,7 @@ bool ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
 			// 如果存在贴图，且贴图的宽、高均不大于 254 像素，且相同的贴图未加入至图集图片数组中
 			if (aImage != nullptr && aImage->mWidth <= 254 && aImage->mHeight <= 254 && FindImage(aImage) < 0)
 			{
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 				int aImagePixels = aImage->mWidth * aImage->mHeight;
 				if (aImagePixels > aAtlasPixelBudget)
 				{
@@ -339,7 +339,7 @@ bool ReanimAtlas::ReanimAtlasCreate(ReanimatorDefinition* theReanimDef)
 			}
 		}
 	}
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	if (aSkippedCount > 0)
 		printf("[ATLAS] %d images left un-atlased (pixel budget)\n", aSkippedCount);
 

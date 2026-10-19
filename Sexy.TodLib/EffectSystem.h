@@ -26,7 +26,7 @@ public:
     TriVertex                   mVertArray[MAX_TRIANGLES][3];
     int                         mTriangleCount;
     int                         mDrawMode;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     float                       mOneOverImageWidth;
     float                       mOneOverImageHeight;
 #endif

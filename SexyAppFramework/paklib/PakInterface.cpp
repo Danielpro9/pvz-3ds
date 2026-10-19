@@ -14,7 +14,7 @@
 #include <map>     // shared pak read-handle cache
 #endif
 
-#ifdef WII_PLATFORM
+#if defined(WII_PLATFORM) || defined(__3DS__)
 #include <cstdlib>   // malloc/free for per-record buffering
 #include <map>       // shared pak read-handle cache
 #include <pthread.h> // serializes seek+read on the shared handle
@@ -189,7 +189,7 @@ static void FixFileName(const char* theFileName, char* theUpperName)
 
 bool PakInterface::AddPakFile(const std::string& theFileName)
 {
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	// Consoles: stream from disk instead of permanently loading the whole pak.
 	// Parse the directory header now, then keep the pak path so each
 	// FOpen() can open a private file handle for concurrent-safe reads.
@@ -546,7 +546,7 @@ PFILE* PakInterface::FOpen(const char* theFileName, const char* anAccess)
 			// Fallback: if buffering failed, keep a streaming handle open.
 			if (aPFP->mBuffer == NULL)
 				aPFP->mFP = fcaseopen(anItr->second.mCollection->mPakPath.c_str(), "rb");
-#elif defined(WII_PLATFORM)
+#elif defined(WII_PLATFORM) || defined(__3DS__)
 			// Keep only the currently-open resource in memory. This avoids the
 			// permanent ~40 MB main.pak copy that exhausted Wii's MEM2 heap.
 			aPFP->mFP = NULL;
@@ -626,7 +626,7 @@ int PakInterface::FClose(PFILE* theFile)
 		fclose(theFile->mFP);
 		PlatformIoLockRelease();
 	}
-#elif defined(WII_PLATFORM)
+#elif defined(WII_PLATFORM) || defined(__3DS__)
 	if (theFile->mBuffer != NULL)
 		free(theFile->mBuffer);
 	if (theFile->mFP != NULL)
@@ -715,7 +715,7 @@ size_t PakInterface::FRead(void* thePtr, int theElemSize, int theCount, PFILE* t
 		for (size_t i = 0; i < bytesRead; i++) p[i] ^= 0xF7;
 		theFile->mPos += (int)bytesRead;
 		return bytesRead / (size_t)theElemSize;
-#elif defined(WII_PLATFORM)
+#elif defined(WII_PLATFORM) || defined(__3DS__)
 		if (theFile->mBuffer != NULL)
 		{
 			memcpy(thePtr, theFile->mBuffer + theFile->mPos, aSizeBytes);
@@ -756,7 +756,7 @@ int PakInterface::FGetC(PFILE* theFile)
 		{
 			if (theFile->mPos >= theFile->mRecord->mSize)
 				return EOF;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 			uchar aChar = 0;
 			if (FRead(&aChar, 1, 1, theFile) != 1) return EOF;
 			if (aChar != '\r') return (uchar)aChar;
@@ -796,7 +796,7 @@ char* PakInterface::FGetS(char* thePtr, int theSize, PFILE* theFile)
 					return NULL;
 				break;
 			}
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 			uchar aChar = 0;
 			if (FRead(&aChar, 1, 1, theFile) != 1) break;
 #else

@@ -574,7 +574,7 @@ void LawnApp::PreNewGame(GameMode theGameMode, bool theLookForSavedGame)
 void LawnApp::MakeNewBoard()
 {
 	KillBoard();
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	// Level boundary: release unused menu/cache definitions plus decoded bits
 	// and textures BEFORE this level's large contiguous definition/atlas
 	// allocations. Freeing adjacent residents now lets malloc coalesce its

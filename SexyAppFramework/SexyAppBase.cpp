@@ -48,6 +48,7 @@
 #include <gccore.h>
 #elif defined(__3DS__)
 #include "sound/DummySoundManager.h"
+#include <malloc.h>
 #else
 #include "sound/SDLSoundManager.h"
 #include "sound/SDLSoundInstance.h"
@@ -2032,7 +2033,7 @@ void SexyAppBase::ReadFromRegistry()
 	if (mRegKey.length() == 0)
 		return;
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	// Persist the emulated registry next to the save data (mass:/mc0:/cwd).
 	regemu::SetRegFile(GetAppDataFolder() + "registry.regemu");
 #else
@@ -5401,6 +5402,10 @@ void SexyAppBase::Init()
 	// TodAssertInitForApp derives from this folder a moment later.
 	snprintf(aPath, sizeof(aPath), "%s/savedata/", wiiGetAppDir());
 	SetAppDataFolder(aPath);
+#elif defined(__3DS__)
+	// mChangeDirTo already ends in '/', so getcwd() + "/savedata/" below would
+	// produce "...PlantsvsZombies//savedata/".
+	SetAppDataFolder(mChangeDirTo + "savedata/");
 #else
 	getcwd(aPath, 512);
 	strcat(aPath, "/savedata/");
@@ -6049,13 +6054,19 @@ void SexyAppBase::PurgeLazyImages()
 	printf("[LAZY] purged %d images\n", aPurged);
 }
 
-#ifdef WII_PLATFORM
+#if defined(WII_PLATFORM) || defined(__3DS__)
 // Bytes the allocator could still hand out: free blocks already inside the heap,
 // plus the MEM2 arena it has not sbrk'd yet.
 static unsigned long WiiHeapFreeBytes()
 {
 	struct mallinfo mi = mallinfo();
+#ifdef WII_PLATFORM
 	return (unsigned long)mi.fordblks + (unsigned long)SYS_GetArena2Size();
+#else
+	// 3DS: newlib grows into a fixed-size heap, so the part not sbrk'd yet is
+	// the counterpart of the Wii's unclaimed MEM2 arena.
+	return (unsigned long)mi.fordblks + (unsigned long)(envGetHeapSize() - mi.arena);
+#endif
 }
 
 // Can the allocator still PLACE a block of this size? Free bytes and placeable
@@ -6100,7 +6111,7 @@ static const unsigned long kWiiPressureMargin = 4ul << 20;
 // allocation here is a hard freeze, not an error dialog.
 bool SexyAppBase::IsHeapUnderPressure()
 {
-#ifdef WII_PLATFORM
+#if defined(WII_PLATFORM) || defined(__3DS__)
 	// Either kind of exhaustion counts: not enough bytes left at all, or enough
 	// bytes but nowhere to put a big one.
 	return WiiHeapFreeBytes() < kWiiPressureLine ||
@@ -6128,7 +6139,7 @@ int SexyAppBase::PurgeLazyImageBits(bool theForce)
 	PlatformIoLockAcquire();
 
 	int aPurged = 0;
-#ifdef WII_PLATFORM
+#if defined(WII_PLATFORM) || defined(__3DS__)
 	int aChecked = 0;
 #endif
 	for (MemoryImageSet::iterator anItr = mMemoryImageSet.begin(); anItr != mMemoryImageSet.end(); ++anItr)
@@ -6136,7 +6147,7 @@ int SexyAppBase::PurgeLazyImageBits(bool theForce)
 		if (PurgeLazyImage(*anItr, true))
 			aPurged++;
 
-#ifdef WII_PLATFORM
+#if defined(WII_PLATFORM) || defined(__3DS__)
 		// Purge just enough, not everything. A forced purge still empties the
 		// set — its callers (the decode OOM rescue) want every byte back — but
 		// the pressure valve stops once it is clear of the line by

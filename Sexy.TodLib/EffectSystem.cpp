@@ -375,7 +375,7 @@ bool gTodTriangleDrawAdditive = false;
 //0x4461B0
 TodTriangleGroup::TodTriangleGroup()
 {
-#if !defined(PS2_PLATFORM) && !defined(WII_PLATFORM)
+#if !defined(PS2_PLATFORM) && !defined(WII_PLATFORM) && !defined(__3DS__)
 	for (int i = 0; i < 256; i++)
 		for (int j = 0; j < 3; j++)
 			mVertArray[i][j].color = 0UL;
@@ -384,7 +384,7 @@ TodTriangleGroup::TodTriangleGroup()
 	mImage = nullptr;
 	mTriangleCount = 0;
 	mDrawMode = Graphics::DRAWMODE_NORMAL;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	mOneOverImageWidth = 0.0f;
 	mOneOverImageHeight = 0.0f;
 #endif
@@ -432,7 +432,7 @@ void TodTriangleGroup::AddTriangle(Graphics* g, Image* theImage, const SexyMatri
 
 	if (mTriangleCount > 0 && (mDrawMode != theDrawMode || mImage != theImage))
 		DrawGroup(g);
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	if (mImage != theImage)
 	{
 		mOneOverImageWidth = 1.0f / theImage->mWidth;
@@ -442,7 +442,7 @@ void TodTriangleGroup::AddTriangle(Graphics* g, Image* theImage, const SexyMatri
 	mImage = theImage;
 	mDrawMode = theDrawMode;
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	float x = -theSrcRect.mWidth * 0.5f;
 	float y = -theSrcRect.mHeight * 0.5f;
 	float x2 = x + theSrcRect.mWidth;
@@ -480,7 +480,7 @@ void TodTriangleGroup::AddTriangle(Graphics* g, Image* theImage, const SexyMatri
 	TOD_ASSERT(theSrcRect.mX >= 0 && theSrcRect.mWidth >= 0 && theSrcRect.mX + theSrcRect.mWidth <= mImage->mWidth);
 	TOD_ASSERT(theSrcRect.mY >= 0 && theSrcRect.mHeight >= 0 && theSrcRect.mY + theSrcRect.mHeight <= mImage->mHeight);
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	float aOneOverWidth = mOneOverImageWidth;
 	float aOneOverHeight = mOneOverImageHeight;
 #else

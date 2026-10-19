@@ -2,7 +2,7 @@
 
 // Low-memory console features shared by engine code. Platform checks live here
 // so image/resource code can branch on a capability instead of a console name.
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 #define SEXY_LAZY_IMAGES
 #define SEXY_COMPACT_IMAGES
 #endif

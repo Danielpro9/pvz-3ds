@@ -1931,7 +1931,7 @@ void CutScene::ClearUpsellBoard()
 	
 	mBoard->mZombies.DataArrayFreeAll();
 	mBoard->mPlants.DataArrayFreeAll();
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	mBoard->InvalidatePlantGridCache();
 #endif
 	mBoard->mCoins.DataArrayFreeAll();

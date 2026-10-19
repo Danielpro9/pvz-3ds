@@ -626,7 +626,7 @@ void Challenge::BeghouledTwistMouseDown(int x, int y)
 			aPlant3->mRenderOrder = aPlant3->CalcRenderOrder();
 			aPlant4->mPlantCol--;
 			aPlant4->mRenderOrder = aPlant4->CalcRenderOrder();
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 			mBoard->InvalidatePlantGridCache();
 #endif
 			BeghouledStartFalling(STATECHALLENGE_BEGHOULED_MOVING);
@@ -722,7 +722,7 @@ void Challenge::BeghouledDragUpdate(int x, int y)
 				aPlantTo->mRow = aGridYFrom;
 				aPlantTo->mRenderOrder = aPlantTo->CalcRenderOrder();
 			}
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 			mBoard->InvalidatePlantGridCache();
 #endif
 
@@ -783,7 +783,7 @@ void Challenge::BeghouledFallIntoSquare(int theGridX, int theGridY, BeghouledBoa
 		{
 			aPlant->mRow = theGridY;
 			aPlant->mRenderOrder = aPlant->CalcRenderOrder();
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 			mBoard->InvalidatePlantGridCache();
 #endif
 			theBoardState->mSeedType[theGridX][theGridY] = aPlant->mSeedType;

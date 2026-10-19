@@ -1133,7 +1133,7 @@ void ZenGarden::MovePlant(Plant* thePlant, int theGridX, int theGridY)
     thePlant->mPlantCol = theGridX;
     thePlant->mRow = theGridY;
     thePlant->mRenderOrder = Board::MakeRenderOrder(RenderLayer::RENDER_LAYER_PLANT, 0, aPosY + 1);
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     mBoard->InvalidatePlantGridCache();
 #endif
 
@@ -1821,7 +1821,7 @@ void ZenGarden::GotoNextGarden()
     LeaveGarden();
     mBoard->ClearAdvice(AdviceType::ADVICE_NONE);
     mBoard->mPlants.DataArrayFreeAll();
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     mBoard->InvalidatePlantGridCache();
 #endif
     mBoard->mCoins.DataArrayFreeAll();

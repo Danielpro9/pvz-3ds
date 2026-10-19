@@ -34,7 +34,7 @@
 //#define SEXY_PERF_ENABLED
 #include "misc/PerfTimer.h"
 #include "Widget/AchievementsScreen.h"
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 #include <stdint.h>
 #endif
 #ifdef PS2_PLATFORM
@@ -48,7 +48,7 @@
 
 bool gShownMoreSunTutorial = false;
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 static Board* gPlantGridCacheBoard = nullptr;
 static PlantsOnLawn gPlantGridCache[MAX_GRID_SIZE_X][MAX_GRID_SIZE_Y];
 static bool gPlantGridCacheDirty = true;
@@ -80,7 +80,7 @@ Board::Board(LawnApp* theApp)
 	mProjectiles.DataArrayInitialize(1024U, "projectiles");
 	mCoins.DataArrayInitialize(1024U, "coins");
 #endif
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	InvalidatePlantGridCache();
 #endif
 	mLawnMowers.DataArrayInitialize(32U, "lawnmowers");
@@ -2184,7 +2184,7 @@ Plant* Board::NewPlant(int theGridX, int theGridY, SeedType theSeedType, SeedTyp
 	Plant* aPlant = mPlants.DataArrayAlloc();
 	aPlant->mIsOnBoard = true;
 	aPlant->PlantInitialize(theGridX, theGridY, theSeedType, theImitaterType);
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	InvalidatePlantGridCache();
 #endif
 	return aPlant;
@@ -2307,7 +2307,7 @@ Plant* Board::GetFlowerPotAt(int theGridX, int theGridY)
 	return nullptr;
 }
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 void Board::InvalidatePlantGridCache()
 {
 	gPlantGridCacheBoard = this;
@@ -2390,7 +2390,7 @@ void Board::GetPlantsOnLawn(int theGridX, int theGridY, PlantsOnLawn* thePlantOn
 	if (mApp->IsWallnutBowlingLevel() && !mCutScene->IsInShovelTutorial())
 		return;
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	if (gPlantGridCacheBoard != this || gPlantGridCacheDirty)
 		RebuildPlantGridCache();
 
@@ -6035,7 +6035,7 @@ void Board::UpdateGame()
 
 	mMainCounter++;
 
-#if defined(LOW_MEMORY) && (defined(PS2_PLATFORM) || defined(WII_PLATFORM))
+#if defined(LOW_MEMORY) && (defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__))
 	// Keep gameplay free of platform/memory policy. LawnApp decides how often
 	// to inspect pressure and how aggressively to collect for this level.
 	mApp->UpdateRuntimeMemoryMaintenance(mMainCounter);
@@ -6086,7 +6086,7 @@ void Board::Update()
 
 	Widget::Update();
 	MarkDirty();
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	InvalidatePlantGridCache();
 #endif
 
@@ -6188,7 +6188,7 @@ void Board::UpdateLayers()
 {
 	if (mWidgetManager)
 	{
-#if !defined(PS2_PLATFORM) && !defined(WII_PLATFORM)
+#if !defined(PS2_PLATFORM) && !defined(WII_PLATFORM) && !defined(__3DS__)
 		mWidgetManager->MarkAllDirty();
 #endif
 
@@ -6333,7 +6333,7 @@ bool RenderItemSortFunc(const RenderItem& theItem1, const RenderItem& theItem2)
 	return theItem1.mZPos < theItem2.mZPos;
 }
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 static unsigned int RenderItemRadixByte(const RenderItem& theItem, unsigned int thePass)
 {
 	uint32_t aZKey = (uint32_t)theItem.mZPos ^ 0x80000000U;
@@ -6845,7 +6845,7 @@ void Board::DrawGameObjects(Graphics* g)
 	AddGameObjectRenderItemCursorPreview(aRenderList, aRenderItemCount, RenderObjectType::RENDER_ITEM_CURSOR_PREVIEW, mCursorPreview);
 
 	TodHesitationTrace("start sort");
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	RenderItemRadixSort(aRenderList, aRenderItemCount);
 #else
 	std::sort(aRenderList, aRenderList + aRenderItemCount, RenderItemSortFunc);

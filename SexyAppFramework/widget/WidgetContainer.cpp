@@ -618,7 +618,7 @@ void WidgetContainer::DrawAll(ModalFlags* theFlags, Graphics* g)
 	
 	if (theFlags->GetFlags() & WIDGETFLAGS_DRAW)
 	{
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 		GraphicsState aDrawState;
 		aDrawState.CopyStateFrom(g);
 		Draw(g);

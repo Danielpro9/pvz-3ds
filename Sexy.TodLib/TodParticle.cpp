@@ -11,7 +11,7 @@ TodParticleDefinition* gParticleDefArray;   // [0x6A9F0C]
 int gParticleParamArraySize;				// [0x6A9F10]
 ParticleParams* gParticleParamArray;		// [0x6A9F14]
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 enum TodEmitterRenderTrackCacheIndex
 {
 	EMITTER_CACHE_SYSTEM_RED,
@@ -348,7 +348,7 @@ bool TodParticleLoadADef(TodParticleDefinition* theParticleDef, const char* theP
 //0x515CE0
 void TodParticleLoadDefinitions(ParticleParams* theParticleParamArray, int theParticleParamArraySize)
 {
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	TodResetEmitterRenderCache();
 #endif
 	TodHesitationBracket aHesitiation("TodParticleLoadDefinitions");
@@ -392,7 +392,7 @@ void TodParticleLoadDefinitions(ParticleParams* theParticleParamArray, int thePa
 //0x515E30
 void TodParticleFreeDefinitions()
 {
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	TodResetEmitterRenderCache();
 #endif
 	for (int i = 0; i < gParticleDefCount; i++)
@@ -622,7 +622,7 @@ TodParticle* TodParticleEmitter::SpawnParticle(int theIndex, int theSpawnCount)
 	aParticle->mPosition.y += FloatTrackEvaluate(mEmitterDef->mEmitterOffsetY, mSystemTimeValue, aEmitterOffsetYInterp);  // 纵坐标加上纵向偏移值
 	
 	aParticle->mAnimationTimeValue = 0.0f;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	if (mEmitterDef->mAnimated || (TodGetEmitterRenderCache(mEmitterDef).mFlags & EMITTER_CACHE_ANIMATION_RATE_SET))
 #else
 	if (mEmitterDef->mAnimated || FloatTrackIsSet(mEmitterDef->mAnimationRate))
@@ -833,7 +833,7 @@ bool TodParticleEmitter::UpdateParticle(TodParticle* theParticle)
 		mEmitterDef->mParticleSpinAngle, theParticle->mParticleLastTimeValue, theParticle->mParticleInterp[ParticleTracks::TRACK_PARTICLE_SPIN_ANGLE]);
 	theParticle->mSpinPosition += DEG_TO_RAD(aSpinSpeed + aSpinAngle - aLastSpinAngle) + theParticle->mSpinVelocity;  // 更新粒子旋转角度
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	if (TodGetEmitterRenderCache(mEmitterDef).mFlags & EMITTER_CACHE_ANIMATION_RATE_SET)
 #else
 	if (FloatTrackIsSet(mEmitterDef->mAnimationRate))  // 如果定义了动画速率
@@ -1045,12 +1045,12 @@ bool TodParticleEmitter::GetRenderParams(TodParticle* theParticle, ParticleRende
 	TodParticleEmitter* aEmitter = theParticle->mParticleEmitter;
 	TodEmitterDefinition* aDef = aEmitter->mEmitterDef;
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	TodEmitterRenderCache& aRenderCache = TodGetEmitterRenderCache(aDef);
 #endif
 
 	// 颜色。对于每一色彩通道，当系统对应轨道、粒子对应轨道和对应覆写中任一有定义时，认为该通道已设定。
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	theParams->mRedIsSet = (aRenderCache.mFlags & EMITTER_CACHE_RED_SET) != 0 || aEmitter->mColorOverride.mRed != 1.0f;
 #else
 	theParams->mRedIsSet = false;
@@ -1058,7 +1058,7 @@ bool TodParticleEmitter::GetRenderParams(TodParticle* theParticle, ParticleRende
 	theParams->mRedIsSet |= FloatTrackIsSet(aDef->mParticleRed);
 	theParams->mRedIsSet |= aEmitter->mColorOverride.mRed != 1.0f;
 #endif
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	theParams->mGreenIsSet = (aRenderCache.mFlags & EMITTER_CACHE_GREEN_SET) != 0 || aEmitter->mColorOverride.mGreen != 1.0f;
 #else
 	theParams->mGreenIsSet = false;
@@ -1066,7 +1066,7 @@ bool TodParticleEmitter::GetRenderParams(TodParticle* theParticle, ParticleRende
 	theParams->mGreenIsSet |= FloatTrackIsSet(aDef->mParticleGreen);
 	theParams->mGreenIsSet |= aEmitter->mColorOverride.mGreen != 1.0f;
 #endif
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	theParams->mBlueIsSet = (aRenderCache.mFlags & EMITTER_CACHE_BLUE_SET) != 0 || aEmitter->mColorOverride.mBlue != 1.0f;
 #else
 	theParams->mBlueIsSet = false;
@@ -1074,7 +1074,7 @@ bool TodParticleEmitter::GetRenderParams(TodParticle* theParticle, ParticleRende
 	theParams->mBlueIsSet |= FloatTrackIsSet(aDef->mParticleBlue);
 	theParams->mBlueIsSet |= aEmitter->mColorOverride.mBlue != 1.0f;
 #endif
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	theParams->mAlphaIsSet = (aRenderCache.mFlags & EMITTER_CACHE_ALPHA_SET) != 0 || aEmitter->mColorOverride.mAlpha != 1.0f;
 #else
 	theParams->mAlphaIsSet = false;
@@ -1083,7 +1083,7 @@ bool TodParticleEmitter::GetRenderParams(TodParticle* theParticle, ParticleRende
 	theParams->mAlphaIsSet |= aEmitter->mColorOverride.mAlpha != 1.0f;
 #endif
 	// 缩放
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	theParams->mParticleScaleIsSet = (aRenderCache.mFlags & EMITTER_CACHE_SCALE_SET) != 0 || aEmitter->mScaleOverride != 1.0f;
 #else
 	theParams->mParticleScaleIsSet = false;
@@ -1091,13 +1091,13 @@ bool TodParticleEmitter::GetRenderParams(TodParticle* theParticle, ParticleRende
 	theParams->mParticleScaleIsSet |= (aEmitter->mScaleOverride != 1.0f);
 #endif
 	// 拉伸
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	theParams->mParticleStretchIsSet = (aRenderCache.mFlags & EMITTER_CACHE_STRETCH_SET) != 0;
 #else
 	theParams->mParticleStretchIsSet = FloatTrackIsSet(aDef->mParticleStretch);
 #endif
 	// 旋转角度。当粒子使用随机初始旋转角度或对齐发射方向角度时，也可认为旋转角度已设定。
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	theParams->mSpinPositionIsSet = (aRenderCache.mFlags & EMITTER_CACHE_SPIN_SET) != 0;
 #else
 	theParams->mSpinPositionIsSet = false;
@@ -1107,7 +1107,7 @@ bool TodParticleEmitter::GetRenderParams(TodParticle* theParticle, ParticleRende
 	theParams->mSpinPositionIsSet |= TestBit(aDef->mParticleFlags, (int)ParticleFlags::PARTICLE_ALIGN_LAUNCH_SPIN);
 #endif
 	// 位置
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	theParams->mPositionIsSet = (aRenderCache.mFlags & EMITTER_CACHE_POSITION_SET) != 0;
 #else
 	theParams->mPositionIsSet = false;
@@ -1119,7 +1119,7 @@ bool TodParticleEmitter::GetRenderParams(TodParticle* theParticle, ParticleRende
 	theParams->mPositionIsSet |= FloatTrackIsSet(aDef->mEmitterBoxY);
 #endif
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	float aSystemRed = TodEvaluateSystemRenderTrack(aRenderCache, EMITTER_CACHE_SYSTEM_RED, aEmitter, aDef->mSystemRed, ParticleSystemTracks::TRACK_SYSTEM_RED);
 	float aSystemGreen = TodEvaluateSystemRenderTrack(aRenderCache, EMITTER_CACHE_SYSTEM_GREEN, aEmitter, aDef->mSystemGreen, ParticleSystemTracks::TRACK_SYSTEM_GREEN);
 	float aSystemBlue = TodEvaluateSystemRenderTrack(aRenderCache, EMITTER_CACHE_SYSTEM_BLUE, aEmitter, aDef->mSystemBlue, ParticleSystemTracks::TRACK_SYSTEM_BLUE);
@@ -1150,7 +1150,7 @@ bool TodParticleEmitter::GetRenderParams(TodParticle* theParticle, ParticleRende
 	theParams->mAlpha = aParticleAlpha * aSystemAlpha * aEmitter->mColorOverride.mAlpha * aBrightness;
 	theParams->mPosX = theParticle->mPosition.x;
 	theParams->mPosY = theParticle->mPosition.y;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	float aParticleScale = TodEvaluateParticleRenderTrack(aRenderCache, EMITTER_CACHE_PARTICLE_SCALE, aEmitter, aDef->mParticleScale, theParticle, ParticleTracks::TRACK_PARTICLE_SCALE);
 	theParams->mParticleStretch = TodEvaluateParticleRenderTrack(aRenderCache, EMITTER_CACHE_PARTICLE_STRETCH, aEmitter, aDef->mParticleStretch, theParticle, ParticleTracks::TRACK_PARTICLE_STRETCH);
 #else
@@ -1199,7 +1199,7 @@ void RenderParticle(Graphics* g, TodParticle* theParticle, const Color& theColor
 {
 	TodParticleEmitter* aEmitter = theParticle->mParticleEmitter;
 	TodEmitterDefinition* aEmitterDef = aEmitter->mEmitterDef;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	TodEmitterRenderCache& aRenderCache = TodGetEmitterRenderCache(aEmitterDef);
 #endif
 	Image* aImage = aEmitter->mImageOverride != nullptr ? aEmitter->mImageOverride : aEmitterDef->mImage;  // 优先使用覆写贴图，无覆写贴图则使用定义的贴图
@@ -1211,7 +1211,7 @@ void RenderParticle(Graphics* g, TodParticle* theParticle, const Color& theColor
 	int aFrame = aEmitter->mFrameOverride;
 	if (aFrame == -1)  // 如果未定义覆写帧
 	{
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 		if (aRenderCache.mFlags & EMITTER_CACHE_ANIMATION_RATE_SET)  // 如果定义了动画速率
 #else
 		if (FloatTrackIsSet(aEmitterDef->mAnimationRate))  // 如果定义了动画速率
@@ -1227,7 +1227,7 @@ void RenderParticle(Graphics* g, TodParticle* theParticle, const Color& theColor
 		aFrame = aImage->mNumCols - 1;
 
 	Rect aSrcRect(aFrame * aCelWidth, std::min(aEmitterDef->mImageRow, aImage->mNumRows - 1) * aCelHeight, aCelWidth, aCelHeight);
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	if ((aRenderCache.mFlags & EMITTER_CACHE_NO_CLIPPING) == 0)
 	{
 		float aClipTop = TodEvaluateParticleRenderTrack(aRenderCache, EMITTER_CACHE_CLIP_TOP, aEmitter, aEmitterDef->mClipTop, theParticle, ParticleTracks::TRACK_PARTICLE_CLIP_TOP);

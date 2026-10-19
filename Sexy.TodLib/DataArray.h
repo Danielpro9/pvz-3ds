@@ -53,14 +53,14 @@ public:
 	void DataArrayInitialize(unsigned int theMaxSize, const char* theName)
 	{
 		TOD_ASSERT(mBlock == nullptr);
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 		unsigned int aBitWordCount = (theMaxSize + 31U) >> 5;
 		mBlock = (DataArrayItem*)operator new(sizeof(DataArrayItem) * theMaxSize + sizeof(unsigned int) * aBitWordCount);
 #else
 		mBlock = (DataArrayItem*)operator new(sizeof(DataArrayItem) * theMaxSize);
 #endif
 		mMaxSize = theMaxSize;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 		memset(DataArrayGetIterationBits(), 0, sizeof(unsigned int) * aBitWordCount);
 #endif
 		mNextKey = 1001U;
@@ -88,7 +88,7 @@ public:
 		TOD_ASSERT(DataArrayGet(aItem->mID) == theItem, "Failed: DataArrayFree(0x%x) in %s", theItem, mName);
 		theItem->~T();
 		unsigned int anId = aItem->mID & DATA_ARRAY_INDEX_MASK;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 		DataArraySetIterationBit(anId, false);
 #endif
 		aItem->mID = mFreeListHead;
@@ -104,7 +104,7 @@ public:
 
 		mFreeListHead = 0U;
 		mMaxUsedCount = 0U;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 		memset(DataArrayGetIterationBits(), 0, sizeof(unsigned int) * DataArrayGetIterationBitWordCount());
 #endif
 	}
@@ -118,7 +118,7 @@ public:
 
 	bool IterateNext(T*& theItem)
 	{
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 		if (mMaxUsedCount == 0U)
 			return false;
 
@@ -197,7 +197,7 @@ public:
 		aNewItem->mID = (mNextKey++ << DATA_ARRAY_KEY_SHIFT) | aNext;
 		if (mNextKey == DATA_ARRAY_MAX_SIZE) mNextKey = 1;
 		mSize++;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 		DataArraySetIterationBit(aNext, true);
 #endif
 
@@ -205,7 +205,7 @@ public:
 		return (T*)aNewItem;
 	}
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	unsigned int DataArrayGetIterationBitWordCount() const
 	{
 		return (mMaxSize + 31U) >> 5;

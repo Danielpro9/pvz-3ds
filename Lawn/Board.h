@@ -309,7 +309,7 @@ public:
 	void							UpdateToolTip();
 	Plant*							GetTopPlantAt(int theGridX, int theGridY, PlantPriority thePriority);
 	void							GetPlantsOnLawn(int theGridX, int theGridY, PlantsOnLawn* thePlantOnLawn);
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	void							InvalidatePlantGridCache();
 	void							RebuildPlantGridCache();
 #endif

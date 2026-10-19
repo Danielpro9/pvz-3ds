@@ -1212,7 +1212,7 @@ void Zombie::BungeeLiftTarget()
 #endif
 
     aPlant->mOnBungeeState = PlantOnBungeeState::RISING_WITH_BUNGEE;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
     mBoard->InvalidatePlantGridCache();
 #endif
     mApp->PlayFoley(FoleyType::FOLEY_FLOOP);
