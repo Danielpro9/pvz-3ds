@@ -46,7 +46,7 @@ void Sexy::PrintF(const char *text, ...)
 
 #if defined(PS2_PLATFORM)
 	(printf)("%s", str);
-#elif defined(WII_PLATFORM)
+#elif defined(WII_PLATFORM) || defined(__3DS__)
 	// Common.h maps the engine's printf calls to PrintF, so writing to stdout
 	// here bypassed the Wii linker's printf wrapper and ignored SEXY_LOG_LEVEL.
 	// Use the shared gated logger: level 0 drops the line, while enabled levels

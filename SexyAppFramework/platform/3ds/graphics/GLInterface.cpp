@@ -8,6 +8,7 @@
 #include "misc/CritSect.h"
 #include "graphics/Graphics.h"
 #include "graphics/MemoryImage.h"
+#include "misc/SexyLog.h"
 
 #include "colored_shbin.h"
 #include "textured_shbin.h"
@@ -1335,11 +1336,13 @@ bool GLInterface::PreDraw()
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 // Once a second, rewrites the first two rows of the top-screen console with
-// the numbers the Old/New 3DS memory budgets are tuned from. Peaks and drops
-// are counted since the previous report.
+// the numbers the Old/New 3DS memory budgets are tuned from, and every 10 s
+// copies them to log.txt so a crash log shows the memory state before it.
+// Peaks and drops are counted since the previous report.
 static void ReportMemoryStats()
 {
 	static u64 aLastReportTime = 0;
+	static int aReportCount = 0;
 	u64 aNow = osGetTime();
 	if (aNow - aLastReportTime < 1000)
 		return;
@@ -1351,14 +1354,26 @@ static void ReportMemoryStats()
 	const char* aProfile = "O3DS";
 #endif
 	struct mallinfo aHeap = mallinfo();
-	printf("\x1b[s\x1b[1;1H\x1b[2K%s heap %luK/%luK linear free %luK"
+	unsigned long aHeapUsedKB = (unsigned long)(aHeap.uordblks / 1024);
+	unsigned long aHeapSizeKB = (unsigned long)(envGetHeapSize() / 1024);
+	unsigned long aLinearFreeKB = (unsigned long)(linearSpaceFree() / 1024);
+	int aCmdBufPercent = (int)(gPeakCmdBufUsage * 100.0f);
+
+	// Straight to the console: through printf it would reach log.txt too.
+	char aLine[256];
+	snprintf(aLine, sizeof(aLine), "\x1b[s\x1b[1;1H\x1b[2K%s heap %luK/%luK linear free %luK"
 		"\x1b[2;1H\x1b[2Ktex %dK vtx %d/%d cmd %d%% drop %d\x1b[u",
-		aProfile,
-		(unsigned long)(aHeap.uordblks / 1024), (unsigned long)(envGetHeapSize() / 1024),
-		(unsigned long)(linearSpaceFree() / 1024),
-		gTotalTexMemSize / 1024, gPeakVertices, MAX_VERTICES,
-		(int)(gPeakCmdBufUsage * 100.0f), gDroppedDraws);
+		aProfile, aHeapUsedKB, aHeapSizeKB, aLinearFreeKB,
+		gTotalTexMemSize / 1024, gPeakVertices, MAX_VERTICES, aCmdBufPercent, gDroppedDraws);
+	fputs(aLine, stdout);
 	fflush(stdout);
+
+	if (++aReportCount % 10 == 0)
+	{
+		SexyLogPrintf("[MEM] %s heap %luK/%luK linear free %luK tex %dK vtx %d/%d cmd %d%% drop %d\n",
+			aProfile, aHeapUsedKB, aHeapSizeKB, aLinearFreeKB,
+			gTotalTexMemSize / 1024, gPeakVertices, MAX_VERTICES, aCmdBufPercent, gDroppedDraws);
+	}
 
 	gPeakVertices = 0;
 	gPeakCmdBufUsage = 0.0f;

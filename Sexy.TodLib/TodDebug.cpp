@@ -347,7 +347,7 @@ extern "C" void TodForceAppendToDebugLog(const char* theMsg)
 // WiiEarlyInit.cpp. Both PS2 and desktop end up writing to gLogFileName, so
 // they share this one definition and differ only in how carefully they do it.
 // ---------------------------------------------------------------------------
-#ifndef WII_PLATFORM
+#if !defined(WII_PLATFORM) && !defined(__3DS__)
 extern "C" void SexyLogSinkWrite(const char* theLine)
 {
 	if (theLine == nullptr)
@@ -374,7 +374,7 @@ extern "C" void SexyLogSinkWrite(const char* theLine)
 	fclose(aFile);
 #endif
 }
-#endif // !WII_PLATFORM
+#endif // !WII_PLATFORM && !__3DS__
 
 void TodTrace(const char* theFormat, ...)
 {
@@ -456,7 +456,7 @@ void TodTraceAndLog(const char* theFormat, ...)
 
 	#ifdef PS2_PLATFORM
 	printf("%s", aButter);
-	#elif defined(WII_PLATFORM)
+	#elif defined(WII_PLATFORM) || defined(__3DS__)
 	// PrintF and TodLogString share the same Wii sink. Emitting through both
 	// would duplicate every TodTraceAndLog line after PrintF was routed through
 	// the level-gated logger.

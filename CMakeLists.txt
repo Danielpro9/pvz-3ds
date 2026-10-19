@@ -201,6 +201,7 @@ elseif(NINTENDO_3DS)
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/3ds/graphics/Window.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/3ds/graphics/GLInterface.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/3ds/Input.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/3ds/CtrLog.cpp
 	)
 	list(APPEND PLAT_INCLUDES
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/3ds

@@ -5,7 +5,8 @@
 
 // Shared half of the logging system: the level gate, the formatting, and the
 // printf capture. Everything platform-specific is behind SexyLogSinkWrite,
-// which lives in WiiEarlyInit.cpp (Wii) and TodDebug.cpp (PS2 and desktop).
+// which lives in WiiEarlyInit.cpp (Wii), platform/3ds/CtrLog.cpp (3DS) and
+// TodDebug.cpp (PS2 and desktop).
 //
 // One buffer size for every path, matching what TodLog/TodTrace/wiiLog each
 // used independently before. Lines longer than this were already being

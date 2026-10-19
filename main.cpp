@@ -7,6 +7,7 @@ using namespace Sexy;
 #include <3ds.h>
 #include <citro3d.h>
 #include <malloc.h>
+#include "CtrLog.h"
 extern "C" {
 	unsigned int __stacksize__ = 512 * 1024;
 }
@@ -21,6 +22,7 @@ SexyString (*gGetCurrentLevelName)();
 int main(int argc, char** argv)
 {
 #ifdef __3DS__
+	CtrLogInit();
 	osSetSpeedupEnable(true);
 #endif
 
