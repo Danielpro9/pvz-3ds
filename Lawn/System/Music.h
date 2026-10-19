@@ -2,7 +2,7 @@
 #define __MUSIC_H__
 
 #include <string>
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 struct Mix_Music;
 #else
 #include <SDL_mixer_ext/SDL_mixer_ext.h>

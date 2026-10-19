@@ -19,46 +19,32 @@ static std::unordered_map<u64, KeyCode> keyMaps = {
 };
 */
 
+// Last touched point in game coordinates. The panel reports nothing once the
+// stylus lifts, so the release is sent where the stylus was last seen.
+static int sTouchX = 0;
+static int sTouchY = 0;
+
 void SexyAppBase::InitInput()
 {
-	/*
-	// Configure our supported input layout: a single player with standard controller styles
-	padConfigureInput(1, HidNpadStyleSet_NpadStandard);
-
-	// Initialize the default gamepad (which reads handheld mode inputs as well as the first connected controller)
-	padInitializeDefault(&pad);
-
-	hidInitializeTouchScreen();
-	*/
-
+	// libctru's default __appInit already started HID. The touchscreen is the
+	// game's pointer, so the mouse always counts as inside the window.
 	if (!mMouseIn)
 		mMouseIn = true;
 }
 
 bool SexyAppBase::StartTextInput(std::string& theInput)
 {
-	/*
-	char buf[512];
+	// The system keyboard applet stands in for the PC keyboard. 12 characters
+	// matches the profile name field (NewUserDialog), which refuses an empty
+	// name and would otherwise block a fresh install.
+	char aBuffer[64] = {};
+	SwkbdState aKeyboard;
+	swkbdInit(&aKeyboard, SWKBD_TYPE_NORMAL, 2, 12);
+	if (swkbdInputText(&aKeyboard, aBuffer, sizeof(aBuffer)) != SWKBD_BUTTON_CONFIRM)
+		return false;
 
-	SwkbdConfig kbd;
-	swkbdCreate(&kbd, 0);
-	swkbdConfigMakePresetDefault(&kbd);
-	swkbdConfigSetType(&kbd, SwkbdType_Normal);
-
-	swkbdConfigSetGuideText(&kbd, "Enter text...");
-	swkbdConfigSetOkButtonText(&kbd, "OK");
-
-	Result rc = swkbdShow(&kbd, buf, sizeof(buf));
-	swkbdClose(&kbd);
-
-	if (R_SUCCEEDED(rc))
-	{
-		theInput = buf;
-		return true;
-	}
-	*/
-
-	return false;
+	theInput = aBuffer;
+	return true;
 }
 
 void SexyAppBase::StopTextInput()
@@ -68,63 +54,38 @@ void SexyAppBase::StopTextInput()
 
 bool SexyAppBase::ProcessDeferredMessages(bool singleMessage)
 {
-	/*
-	if (!appletMainLoop())
+	if (!aptMainLoop())
 	{
 		mShutdown = true;
 		return false;
 	}
 
-	static s32 prev_touchcount = 0;
+	hidScanInput();
+	u32 aKeysDown = hidKeysDown();
+	u32 aKeysHeld = hidKeysHeld();
+	u32 aKeysUp = hidKeysUp();
 
-	// Scan the gamepad. This should be done once for each frame
-	padUpdate(&pad);
+	// Touchscreen as the left mouse button: contact presses, dragging moves,
+	// lifting releases. Panel pixels (320x240) are mapped to game coordinates
+	// by RemapMouse, using the rect set up in MakeWindow.
+	if (aKeysHeld & KEY_TOUCH)
+	{
+		touchPosition aTouch;
+		hidTouchRead(&aTouch);
+		sTouchX = aTouch.px;
+		sTouchY = aTouch.py;
+		mWidgetManager->RemapMouse(sTouchX, sTouchY);
 
-	u64 kDown = padGetButtonsDown(&pad);
-	u64 kUp = padGetButtonsUp(&pad);
-
-	if (kDown)
+		mLastUserInputTick = mLastTimerTime;
+		mWidgetManager->MouseMove(sTouchX, sTouchY);
+		if (aKeysDown & KEY_TOUCH)
+			mWidgetManager->MouseDown(sTouchX, sTouchY, 1);
+	}
+	else if (aKeysUp & KEY_TOUCH)
 	{
 		mLastUserInputTick = mLastTimerTime;
-
-		for (auto& k : keyMaps)
-		{
-			if (kDown & k.first)
-				mWidgetManager->KeyDown(k.second);
-		}
+		mWidgetManager->MouseUp(sTouchX, sTouchY, 1);
 	}
-
-	if (kUp)
-	{
-		mLastUserInputTick = mLastTimerTime;
-
-		for (auto& k : keyMaps)
-		{
-			if (kDown & k.first)
-				mWidgetManager->KeyUp(k.second);
-		}
-	}
-
-	HidTouchScreenState state = {0};
-	hidGetTouchScreenStates(&state, 1);
-	static int x=0, y=0;
-	if (state.count)
-	{
-		mLastUserInputTick = mLastTimerTime;
-
-		x = (int)state.touches[0].x;
-		y = (int)state.touches[0].y;
-		mWidgetManager->RemapMouse(x, y);
-		mWidgetManager->MouseMove(x, y);
-	}
-
-	if (state.count && !prev_touchcount)
-		mWidgetManager->MouseDown(x, y, 1);
-	else if (!state.count && prev_touchcount)
-		mWidgetManager->MouseUp(x, y, 1);
-
-	prev_touchcount = state.count;
-	*/
 
 	return false;
 }

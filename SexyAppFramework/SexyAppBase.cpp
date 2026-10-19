@@ -46,6 +46,8 @@
 #include "misc/GraphicsBlockArena.h"
 #include <malloc.h>
 #include <gccore.h>
+#elif defined(__3DS__)
+#include "sound/DummySoundManager.h"
 #else
 #include "sound/SDLSoundManager.h"
 #include "sound/SDLSoundInstance.h"
@@ -58,7 +60,7 @@
 #include "misc/ModVal.h"
 //#include "graphics/SysFont.h"
 #include "misc/ResourceManager.h"
-#if !defined(PS2_PLATFORM) && !defined(WII_PLATFORM)
+#if !defined(PS2_PLATFORM) && !defined(WII_PLATFORM) && !defined(__3DS__)
 #include "sound/SDLMusicInterface.h"
 #endif
 #include "misc/AutoCrit.h"
@@ -4044,8 +4046,9 @@ void SexyAppBase::StartLoadingThread()
 		mLoadingThreadStarted = true;
 		//_beginthread(LoadingThreadProcStub, 0, this);
 		pthread_t id;
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 		// PTE's default pthread stack is only 32KB (malloc'd from the heap).
+		// libctru's default on 3DS is the same 32KB.
 		// The loading thread runs libpng/JPEG/XML/vorbis decoding; overflowing
 		// that stack corrupts adjacent heap blocks and detonates much later.
 		pthread_attr_t anAttr;
@@ -5285,7 +5288,7 @@ MusicInterface* SexyAppBase::CreateMusicInterface()
 	// UpdateFrames() calls once a frame. PS2 can afford a dummy here because
 	// its mixer thread pumps its own stream.
 	return new WiiMusicInterface();
-#elif defined(PS2_PLATFORM)
+#elif defined(PS2_PLATFORM) || defined(__3DS__)
 	return new DummyMusicInterface();
 #else
 	return new SDLMusicInterface();
@@ -5565,6 +5568,9 @@ void SexyAppBase::Init()
 		mSoundManager = new Ps2SoundManager();
 #elif defined(WII_PLATFORM)
 		mSoundManager = new WiiSoundManager();
+#elif defined(__3DS__)
+		// No 3DS audio backend yet: silent, like PS2 before Ps2SoundManager.
+		mSoundManager = new DummySoundManager();
 #else
 		mSoundManager = new SDLSoundManager();
 #endif

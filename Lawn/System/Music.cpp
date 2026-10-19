@@ -5,7 +5,7 @@
 #include "paklib/PakInterface.h"
 #include "../../Sexy.TodLib/TodDebug.h"
 #include "../../Sexy.TodLib/TodCommon.h"
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 #include "sound/MusicInterface.h"
 #ifdef PS2_PLATFORM
 #include "platform/ps2/sound/Ps2SoundManager.h"
@@ -67,7 +67,7 @@ public:
 	virtual void Update() {}
 	virtual int GetMusicOrder(int) { return 0; }
 };
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 // ---------------------------------------------------------------------------
 // OGG music mode: neither console build has mod (.mo3) playback. If the user
 // drops per-tune OGG files into sounds/ (PVZ soundtrack names, e.g.
@@ -90,7 +90,7 @@ public:
 	// below has to park it or the IOP wedges on real hardware.
 	typedef Sexy::Ps2MixerIoPauseScope StreamMusicIoPauseScope;
 	#define STREAM_MUSIC_TAG "PS2"
-#else
+#elif defined(WII_PLATFORM)
 	#define StreamMusicPlay			Sexy::WiiMusicPlay
 	#define StreamMusicStop			Sexy::WiiMusicStop
 	#define StreamMusicSetPaused	Sexy::WiiMusicSetPaused
@@ -107,6 +107,16 @@ public:
 	// its logging goes elsewhere and its mixer/fio interaction is delicate
 	// enough that this is not the change to bundle it with.
 	#define StreamMusicLog			wiiLog
+#else
+	// No 3DS audio backend yet, so the OGG soundtrack path runs silent.
+	// StreamMusicPlay owns the buffer it is given, hence the free.
+	static inline bool StreamMusicPlay(unsigned char* theOggData, int, bool) { free(theOggData); return false; }
+	static inline void StreamMusicStop() {}
+	static inline void StreamMusicSetPaused(bool) {}
+	static inline bool StreamMusicIsPlaying() { return false; }
+	static inline void StreamMusicSetVolume(double) {}
+	struct StreamMusicIoPauseScope {};
+	#define STREAM_MUSIC_TAG "3DS"
 #endif
 
 #ifndef StreamMusicLog
@@ -424,7 +434,7 @@ void Music::LoadSong(MusicFile theMusicFile, const std::string& theFileName)
 //0x45A8A0
 void Music::MusicTitleScreenInit()
 {
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	// Same rule as MusicInit below: on console NEVER fall through to the
 	// LoadSong(".mo3") path. This runs on the MAIN thread at the first title
 	// draw — before the loading thread even starts — so a Mix_LoadMUS_RW hang
@@ -445,7 +455,7 @@ void Music::MusicInit()
 	int aNumLoadingTasks = mApp->mCompletedLoadingThreadTasks + GetNumLoadingTasks();
 #endif
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	// Neither console build has .mo3 (mod) playback: music is per-tune OGG streaming
 	// only. When the OGG soundtrack is present it streams on demand; when it is
 	// absent we run SILENT. Either way we return here and MUST NOT fall through
@@ -499,7 +509,7 @@ void Music::MusicCreditScreenInit()
 //0x45ABB0
 void Music::StopAllMusic()
 {
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	if (gStreamOggMusicMode)
 		StreamMusicStop();
 #endif
@@ -538,7 +548,7 @@ Mix_Music* Music::GetMusicHandle(MusicFile theMusicFile)
 //0x45AC70
 void Music::PlayFromOffset(MusicFile theMusicFile, int theOffset, double theVolume)
 {
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	if (gStreamOggMusicMode)
 	{
 		// Only the credit screen calls this directly; the offset (a mod order)
@@ -588,7 +598,7 @@ void Music::PlayFromOffset(MusicFile theMusicFile, int theOffset, double theVolu
 //0x45ADB0
 void Music::PlayMusic(MusicTune theMusicTune, int theOffset, int theDrumsOffset)
 {
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	if (gStreamOggMusicMode)
 	{
 		// One streamed OGG per tune; offsets/drum layers don't apply.
@@ -1002,7 +1012,7 @@ void Music::MusicUpdate()
 		else
 		{
 			float aFadeLevel = TodAnimateCurveFloat(mFadeOutDuration, 0, mFadeOutCounter, 1.0f, 0.0f, TodCurves::CURVE_LINEAR);
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 			if (gStreamOggMusicMode)
 				StreamMusicSetVolume(aFadeLevel);
 			else
@@ -1011,7 +1021,7 @@ void Music::MusicUpdate()
 		}
 	}
 
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	// Burst/resync poke at mod-music orders that don't exist in OGG mode.
 	if (gStreamOggMusicMode)
 		return;
@@ -1075,7 +1085,7 @@ void Music::StartGameMusic(Board* theBoard)
 //0x45B930
 void Music::GameMusicPause(bool thePause)
 {
-#if defined(PS2_PLATFORM) || defined(WII_PLATFORM)
+#if defined(PS2_PLATFORM) || defined(WII_PLATFORM) || defined(__3DS__)
 	if (gStreamOggMusicMode)
 	{
 		if (thePause && !mPaused && mCurMusicTune != MusicTune::MUSIC_TUNE_NONE)

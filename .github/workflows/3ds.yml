@@ -1,0 +1,27 @@
+name: 3DS build
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkitarm:latest
+    strategy:
+      matrix:
+        profile: [old3ds, new3ds]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install 3DS libraries
+        shell: bash
+        run: dkp-pacman -S --needed --noconfirm 3ds-zlib 3ds-libpng 3ds-libjpeg-turbo
+
+      - name: Run CMake and compile
+        shell: bash
+        run: bash ./build_3ds.sh ${{ matrix.profile }}
+
+      - name: Upload .3dsx artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pvz_${{ matrix.profile }}.3dsx
+          path: ./build/3ds-${{ matrix.profile }}/pvz_${{ matrix.profile }}.3dsx

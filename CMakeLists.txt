@@ -165,9 +165,35 @@ elseif(NINTENDO_SWITCH)
 		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/switch
 	)
 elseif(NINTENDO_3DS)
+	# One source tree, two hardware profiles. OLD3DS follows the PS2 memory
+	# strategy, NEW3DS the Wii one. Pass -DPVZ_3DS_PROFILE=NEW3DS to switch.
+	set(PVZ_3DS_PROFILE "OLD3DS" CACHE STRING "Nintendo 3DS hardware profile (OLD3DS or NEW3DS)")
+	set_property(CACHE PVZ_3DS_PROFILE PROPERTY STRINGS OLD3DS NEW3DS)
+	if(NOT PVZ_3DS_PROFILE MATCHES "^(OLD3DS|NEW3DS)$")
+		message(FATAL_ERROR "PVZ_3DS_PROFILE must be OLD3DS or NEW3DS")
+	endif()
+	# Textures are stored at 1/2^shift resolution, invisible to game layout
+	# (same idea as PS2_GS_TEXTURE_SHRINK_SHIFT). Old 3DS halves them like PS2,
+	# New 3DS keeps the full resolution like Wii.
+	if(PVZ_3DS_PROFILE STREQUAL "NEW3DS")
+		set(CTR_TEXTURE_SHRINK_SHIFT 0)
+	else()
+		set(CTR_TEXTURE_SHRINK_SHIFT 1)
+	endif()
+
 	set(NO_GLEW ON)
 	set(LOW_MEMORY ON)
-	set(DOWNSCALE_COUNT 2)
+	# Must stay 1 for the same reason as PS2 (see above): the game has no
+	# global coordinate scaling. The 800x600 frame is scaled to the 320x240
+	# bottom screen by the projection instead.
+	set(DOWNSCALE_COUNT 1)
+	# devkitPro ships no SDL2 for 3DS, so 3DS takes the console path PS2/Wii
+	# use: SDL.h shim and no SDL audio backend yet.
+	list(REMOVE_ITEM SOURCES
+		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/sound/SDLSoundManager.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/sound/SDLSoundInstance.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/sound/SDLMusicInterface.cpp
+	)
 	ctr_add_shader_library(colored ${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/3ds/graphics/colored.v.pica)
 	ctr_add_shader_library(textured ${CMAKE_CURRENT_SOURCE_DIR}/SexyAppFramework/platform/3ds/graphics/textured.v.pica)
 	dkp_add_embedded_binary_library(shaders colored textured)
@@ -196,14 +222,14 @@ option(CONSOLE "Show console on Windows" ON)
 find_package(ZLIB REQUIRED)
 find_package(JPEG REQUIRED)
 find_package(PNG REQUIRED)
-if (NOT PS2 AND NOT NINTENDO_WII)
+if (NOT PS2 AND NOT NINTENDO_WII AND NOT NINTENDO_3DS)
 	find_package(SDL2 REQUIRED)
 	if (NOT NO_GLEW)
 		find_package(GLEW REQUIRED)
 	endif()
 endif()
 
-if (NOT PS2 AND NOT NINTENDO_WII)
+if (NOT PS2 AND NOT NINTENDO_WII AND NOT NINTENDO_3DS)
 	set(SDL_MIXER_X_STATIC ON CACHE BOOL "Build static library of SDL Mixer X" FORCE)
 	set(SDL_MIXER_X_SHARED OFF CACHE BOOL "Build shared library of SDL Mixer X" FORCE)
 	set(USE_MIDI OFF CACHE BOOL "SDL Mixer X midi" FORCE)
@@ -222,7 +248,7 @@ target_include_directories(re-plants-vs-zombies PRIVATE
 	${PROJECT_SOURCE_DIR}/SexyAppFramework/sound/SDL-Mixer-X/include
 	${PLAT_INCLUDES}
 )
-if (NOT PS2 AND NOT NINTENDO_WII)
+if (NOT PS2 AND NOT NINTENDO_WII AND NOT NINTENDO_3DS)
 	target_include_directories(re-plants-vs-zombies PRIVATE ${SDL2_INCLUDE_DIRS})
 endif()
 target_compile_definitions(re-plants-vs-zombies PRIVATE _DEBUG SEXY_LOG_LEVEL=${SEXY_LOG_LEVEL})
@@ -269,6 +295,14 @@ if (NINTENDO_WII)
 	)
 endif()
 
+if (NINTENDO_3DS)
+	target_compile_definitions(re-plants-vs-zombies PRIVATE
+		PVZ_3DS_PROFILE_${PVZ_3DS_PROFILE}
+		CTR_TEXTURE_SHRINK_SHIFT=${CTR_TEXTURE_SHRINK_SHIFT}
+	)
+	target_compile_options(re-plants-vs-zombies PRIVATE -include SDL.h)
+endif()
+
 if (LOW_MEMORY)
 	target_compile_definitions(re-plants-vs-zombies PRIVATE LOW_MEMORY)
 endif()
@@ -292,6 +326,8 @@ elseif (PS2)
 		fileXio cdvd
 		m
 	)
+elseif (NINTENDO_3DS)
+	target_link_libraries(re-plants-vs-zombies jpeg png z)
 else()
 	target_link_libraries(re-plants-vs-zombies jpeg png z SDL2_mixer_ext_Static openmpt mpg123 ${VORBIS_LIBS} ogg ${SDL2_LIBRARIES} ${GLEW_LIBRARIES})
 endif()
@@ -370,16 +406,21 @@ elseif (NINTENDO_SWITCH)
 elseif (NINTENDO_3DS)
 	target_link_libraries(re-plants-vs-zombies citro3d shaders)
 
-	ctr_generate_smdh(re-plants-vs-zombies.smdh
+	# pvz_old3ds / pvz_new3ds, like pvz_ps2 / pvz_wii. Must be set before
+	# ctr_create_3dsx, which names the .3dsx after OUTPUT_NAME.
+	string(TOLOWER "pvz_${PVZ_3DS_PROFILE}" PVZ_3DS_OUTPUT_NAME)
+	set_target_properties(re-plants-vs-zombies PROPERTIES OUTPUT_NAME "${PVZ_3DS_OUTPUT_NAME}")
+
+	ctr_generate_smdh(${PVZ_3DS_OUTPUT_NAME}.smdh
 		NAME "Plants vs. Zombies"
-		DESCRIPTION "GOTY Edition"
+		DESCRIPTION "GOTY Edition (${PVZ_3DS_PROFILE})"
 		AUTHOR "PopCap Games, Unofficial 3DS port by Headshotnoby"
 		VERSION "0.1"
 		ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon-3ds.png"
 	)
 
 	ctr_create_3dsx(re-plants-vs-zombies
-		SMDH re-plants-vs-zombies.smdh
+		SMDH ${PVZ_3DS_OUTPUT_NAME}.smdh
 	)
 else()
 	target_link_libraries(re-plants-vs-zombies GL)

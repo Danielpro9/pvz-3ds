@@ -5,6 +5,7 @@ using namespace Sexy;
 
 #ifdef __3DS__
 #include <3ds.h>
+#include <citro3d.h>
 #include <malloc.h>
 extern "C" {
 	unsigned int __stacksize__ = 512 * 1024;
@@ -34,6 +35,12 @@ int main(int argc, char** argv)
 	gLawnApp->Shutdown();
 	if (gLawnApp)
 		delete gLawnApp;
+
+#ifdef __3DS__
+	// Started in SexyAppBase::MakeWindow (platform/3ds/graphics/Window.cpp).
+	C3D_Fini();
+	gfxExit();
+#endif
 
 	return 0;
 };

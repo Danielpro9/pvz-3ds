@@ -1,4 +1,5 @@
 #include <3ds.h>
+#include <malloc.h>
 
 #include "graphics/GLInterface.h"
 #include "graphics/GLImage.h"
@@ -11,7 +12,14 @@
 #include "colored_shbin.h"
 #include "textured_shbin.h"
 
-#define MAX_VERTICES 2048
+// Vertices of one frame. The buffer is only rewound once the GPU has finished
+// the previous frame (C3D_FrameBegin SYNCDRAW), so it must hold a whole frame.
+#define MAX_VERTICES 8192
+// libctru svcBreaks when a GPU command does not fit in the command buffer, so
+// a draw that would cut into this reserve is dropped instead. The reserve
+// covers one draw's state upload plus the frame end, the same idea as
+// PS2_GS_QUEUE_GUARD_BYTES.
+#define CMDBUF_GUARD_WORDS (8192 / 4)
 #define GetColorFromTriVertex(theVertex, theColor) (theVertex.color?theVertex.color:theColor)
 
 #define DISPLAY_TRANSFER_FLAGS \
@@ -49,6 +57,12 @@ static int gStartVertex;
 static int gNumVertices;
 static int gVertexMode;
 
+// Measured by ReportMemoryStats; see GLInterface::Flush.
+static int gTotalTexMemSize;
+static int gPeakVertices;
+static float gPeakCmdBufUsage;
+static int gDroppedDraws;
+
 static void GfxBegin(int vertexMode)
 {
 	if (gVertexMode != -1) return;
@@ -59,8 +73,14 @@ static void GfxEnd()
 {
 	if (gVertexMode == -1) return;
 
-	C3D_DrawArrays((GPU_Primitive_t)gVertexMode, gStartVertex, gNumVertices);
-	gStartVertex += gNumVertices;
+	if (gNumVertices > 0)
+	{
+		if (gpuCmdBufSize - gpuCmdBufOffset > CMDBUF_GUARD_WORDS)
+			C3D_DrawArrays((GPU_Primitive_t)gVertexMode, gStartVertex, gNumVertices);
+		else
+			gDroppedDraws++;
+		gStartVertex += gNumVertices;
+	}
 
 	gVertexMode = -1;
 	gNumVertices = 0;
@@ -70,16 +90,17 @@ static void GfxAddVertices(const GLVertex *arr, int arrCount)
 {
 	if (gVertexMode == -1) return;
 
-	if (gStartVertex + gNumVertices + arrCount >= MAX_VERTICES)
+	// Vertices already queued this frame are still unread by the GPU, so a
+	// full buffer cannot wrap around: drop the primitive instead.
+	if (gStartVertex + gNumVertices + arrCount > MAX_VERTICES)
 	{
-		int oldMode = gVertexMode;
-		GfxEnd();
-		GfxBegin(oldMode);
+		gDroppedDraws++;
+		return;
 	}
-	
-	for (int i=gStartVertex + gNumVertices; i<gStartVertex + gNumVertices + arrCount; i++)
+
+	for (int i=0; i<arrCount; i++)
 	{
-		gVertices[i] = arr[i];
+		gVertices[gStartVertex + gNumVertices + i] = arr[i];
 	}
 	gNumVertices += arrCount;
 }
@@ -88,16 +109,15 @@ static void GfxAddVertices(VertexList &arr)
 {
 	if (gVertexMode == -1) return;
 
-	if (gStartVertex + gNumVertices + arr.size() >= MAX_VERTICES)
+	if (gStartVertex + gNumVertices + arr.size() > MAX_VERTICES)
 	{
-		int oldMode = gVertexMode;
-		GfxEnd();
-		GfxBegin(oldMode);
+		gDroppedDraws++;
+		return;
 	}
 
-	for (int i=gStartVertex + gNumVertices; i<gStartVertex + gNumVertices + arr.size(); i++)
+	for (int i=0; i<arr.size(); i++)
 	{
-		gVertices[i] = arr[i];
+		gVertices[gStartVertex + gNumVertices + i] = arr[i];
 	}
 	gNumVertices += arr.size();
 }
@@ -106,11 +126,10 @@ static void GfxAddVertices(const TriVertex arr[][3], int arrCount, unsigned int 
 {
 	if (gVertexMode == -1) return;
 
-	if (gStartVertex + gNumVertices + arrCount*3 >= MAX_VERTICES)
+	if (gStartVertex + gNumVertices + arrCount*3 > MAX_VERTICES)
 	{
-		int oldMode = gVertexMode;
-		GfxEnd();
-		GfxBegin(oldMode);
+		gDroppedDraws++;
+		return;
 	}
 
 	for (int aTriangleNum=0; aTriangleNum < arrCount; aTriangleNum++)
@@ -197,321 +216,24 @@ static inline u32 CalcZOrder(u32 a)
 // Pixels are arranged in a recursive Z-order curve / Morton offset
 // They are arranged into 8x8 tiles, where each 8x8 tile is composed of
 //  four 4x4 subtiles, which are in turn composed of four 2x2 subtiles
-static void ToMortonTexture32(C3D_Tex* tex, u32* dst, u32* src, int originX, int originY, int width, int height)
+// The PICA200 reads the first stored row as v=1, so rows are stored bottom-up
+// to keep the engine's GL-style v=0 at the top of the image.
+static inline u32 GetTiledOffset(const C3D_Tex* theTex, int x, int y)
 {
-	u32 pixel;
-	unsigned int mortonX, mortonY;
-	unsigned int dstX, dstY, tileX, tileY;
-
-	for (int y = 0; y < height; y++)
-	{
-		dstY    = tex->height - 1 - (y + originY);
-		tileY   = dstY & ~0x07;
-		mortonY = CalcZOrder(dstY & 0x07) << 1;
-
-		for (int x = 0; x < width; x++)
-		{
-			dstX    = x + originX;
-			tileX   = dstX & ~0x07;
-			mortonX = CalcZOrder(dstX & 0x07);
-			pixel   = src[x + (y * width)];
-
-			u8 r = pixel & 0xff;
-			u8 g = (pixel >> 8) & 0xff;
-			u8 b = (pixel >> 16) & 0xff;
-			u8 a = (pixel >> 24) & 0xff;
-			pixel = (a<<0) | (r<<8) | (g<<16) | (b<<24);
-
-			dst[(mortonX | mortonY) + (tileX * 8) + (tileY * tex->width)] = pixel;
-		}
-	}
-}
-
-static void ToMortonTexture16(C3D_Tex* tex, u16* dst, u16* src, int originX, int originY, int width, int height)
-{
-	u16 pixel;
-	unsigned int mortonX, mortonY;
-	unsigned int dstX, dstY, tileX, tileY;
-
-	for (int y = 0; y < height; y++)
-	{
-		dstY    = tex->height - 1 - (y + originY);
-		tileY   = dstY & ~0x07;
-		mortonY = CalcZOrder(dstY & 0x07) << 1;
-
-		for (int x = 0; x < width; x++)
-		{
-			dstX    = x + originX;
-			tileX   = dstX & ~0x07;
-			mortonX = CalcZOrder(dstX & 0x07);
-			pixel   = src[x + (y * width)];
-
-			u8 r = pixel & 0xff;
-			u8 g = (pixel >> 4) & 0xff;
-			u8 b = (pixel >> 8) & 0xff;
-			u8 a = (pixel >> 12) & 0xff;
-			pixel = (a<<0) | (r<<4) | (g<<8) | (b<<12);
-
-			dst[(mortonX | mortonY) + (tileX * 8) + (tileY * tex->width)] = pixel;
-		}
-	}
-}
-
-static void ToMortonTexture565(C3D_Tex* tex, u16* dst, u16* src, int originX, int originY, int width, int height)
-{
-	u16 pixel;
-	unsigned int mortonX, mortonY;
-	unsigned int dstX, dstY, tileX, tileY;
-
-	for (int y = 0; y < height; y++)
-	{
-		dstY    = tex->height - 1 - (y + originY);
-		tileY   = dstY & ~0x07;
-		mortonY = CalcZOrder(dstY & 0x07) << 1;
-
-		for (int x = 0; x < width; x++)
-		{
-			dstX    = x + originX;
-			tileX   = dstX & ~0x07;
-			mortonX = CalcZOrder(dstX & 0x07);
-			pixel   = src[x + (y * width)];
-
-			dst[(mortonX | mortonY) + (tileX * 8) + (tileY * tex->width)] = pixel;
-		}
-	}
-}
-
-static void CopyImageToTexture8888(C3D_Tex *theTex, MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
-{
-	uint32_t *aDest = new uint32_t[theDestPitch * theDestHeight];
-
-	if (theImage->mColorTable == NULL)
-	{
-		uint32_t *srcRow = (uint32_t*)theImage->GetBits() + offy * theImage->GetWidth() + offx;
-		uint32_t *dstRow = aDest;
-
-		for(int y=0; y<theHeight; y++)
-		{
-			uint32_t *src = srcRow;
-			uint32_t *dst = dstRow;
-			for(int x=0; x<theWidth; x++)
-				*dst++ = *src++;
-
-			if (rightPad)
-				*dst = *(dst-1);
-
-			srcRow += theImage->GetWidth();
-			dstRow += theDestPitch;
-		}
-	}
-	else // palette
-	{
-		uint8_t *srcRow = (uint8_t*)theImage->mColorIndices + offy * theImage->GetWidth() + offx;
-		uint32_t *dstRow = aDest;
-		uint32_t *palette = (uint32_t*)theImage->mColorTable;
-
-		for(int y=0; y<theHeight; y++)
-		{
-			uint8_t *src = srcRow;
-			uint32_t *dst = dstRow;
-			for(int x=0; x<theWidth; x++)
-				*dst++ = palette[*src++];
-
-			if (rightPad)
-				*dst = *(dst-1);
-
-			srcRow += theImage->GetWidth();
-			dstRow += theDestPitch;
-		}
-	}
-
-	if (bottomPad)
-	{
-		uint32_t *dstrow = aDest + (theDestPitch*theHeight);
-		memcpy(dstrow, dstrow-(theDestPitch*4), (theDestPitch*4));
-	}
-
-	if (create)
-		ToMortonTexture32(theTex, (u32*)theTex->data, (u32*)aDest, 0, 0, theDestPitch, theDestHeight);
-	else
-		ToMortonTexture32(theTex, (u32*)theTex->data, (u32*)aDest, offx, offy, theDestPitch, theDestHeight);
-
-	delete[] aDest;
-}
-
-static void CopyImageToTexture4444(C3D_Tex *theTex, MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
-{
-	uint16_t *aDest = new uint16_t[theDestPitch * theDestHeight];
-
-	if (theImage->mColorTable == NULL)
-	{
-		uint32_t *srcRow = (uint32_t*)theImage->GetBits() + offy * theImage->GetWidth() + offx;
-		uint16_t *dstRow = aDest;
-
-		for(int y=0; y<theHeight; y++)
-		{
-			uint32_t *src = srcRow;
-			uint16_t *dst = dstRow;
-			for(int x=0; x<theWidth; x++)
-			{
-				uint32_t aPixel = *src++;
-				*dst++ = ((aPixel>>16)&0xF000) | ((aPixel>>12)&0x0F00) | ((aPixel>>8)&0x00F0) | ((aPixel>>4)&0x000F);
-			}
-
-			if (rightPad)
-				*dst = *(dst-1);
-
-			srcRow += theImage->GetWidth();
-			dstRow += theDestPitch;
-		}
-	}
-	else // palette
-	{
-		uint8_t *srcRow = (uint8_t*)theImage->mColorIndices + offy * theImage->GetWidth() + offx;
-		uint16_t *dstRow = aDest;
-		uint32_t *palette = (uint32_t*)theImage->mColorTable;
-
-		for(int y=0; y<theHeight; y++)
-		{
-			uint8_t *src = srcRow;
-			uint16_t *dst = dstRow;
-			for(int x=0; x<theWidth; x++)
-			{
-				uint32_t aPixel = palette[*src++];
-				*dst++ = ((aPixel>>16)&0xF000) | ((aPixel>>12)&0x0F00) | ((aPixel>>8)&0x00F0) | ((aPixel>>4)&0x000F);
-			}
-
-			if (rightPad)
-				*dst = *(dst-1);
-
-			srcRow += theImage->GetWidth();
-			dstRow += theDestPitch;
-		}
-	}
-
-	if (bottomPad)
-	{
-		uint16_t *dstrow = aDest + (theDestPitch*theHeight);
-		memcpy(dstrow, dstrow-(theDestPitch*2), (theDestPitch*2));
-	}
-
-	if (create)
-		ToMortonTexture16(theTex, (u16*)theTex->data, (u16*)aDest, 0, 0, theDestPitch, theDestHeight);
-	else
-		ToMortonTexture16(theTex, (u16*)theTex->data, (u16*)aDest, offx, offy, theDestPitch, theDestHeight);
-
-	delete[] aDest;
-}
-
-static void CopyImageToTexture565(C3D_Tex *theTex, MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
-{
-	uint16_t *aDest = new uint16_t[theDestPitch * theDestHeight];
-
-	if (theImage->mColorTable == NULL)
-	{
-		uint32_t *srcRow = (uint32_t*)theImage->GetBits() + offy * theImage->GetWidth() + offx;
-		uint16_t *dstRow = aDest;
-
-		for(int y=0; y<theHeight; y++)
-		{
-			uint32_t *src = srcRow;
-			uint16_t *dst = dstRow;
-			for(int x=0; x<theWidth; x++)
-			{
-				uint32_t aPixel = *src++;
-				*dst++ = ((aPixel>>8)&0xF800) | ((aPixel>>5)&0x07E0) | ((aPixel>>3)&0x001F);
-			}
-
-			if (rightPad)
-				*dst = *(dst-1);
-
-			srcRow += theImage->GetWidth();
-			dstRow += theDestPitch;
-		}
-	}
-	else
-	{
-		uint8_t *srcRow = (uint8_t*)theImage->mColorIndices + offy * theImage->GetWidth() + offx;
-		uint16_t *dstRow = aDest;
-		uint32_t *palette = (uint32_t*)theImage->mColorTable;
-
-		for(int y=0; y<theHeight; y++)
-		{
-			uint8_t *src = srcRow;
-			uint16_t *dst = dstRow;
-			for(int x=0; x<theWidth; x++)
-			{
-				uint32_t aPixel = palette[*src++];
-				*dst++ = ((aPixel>>8)&0xF800) | ((aPixel>>5)&0x07E0) | ((aPixel>>3)&0x001F);
-			}
-
-			if (rightPad)
-				*dst = *(dst-1);
-
-			srcRow += theImage->GetWidth();
-			dstRow += theDestPitch;
-		}
-	}
-
-	if (bottomPad)
-	{
-		uint16_t *dstrow = aDest + (theDestPitch*theHeight);
-		memcpy(dstrow, dstrow-(theDestPitch*2), (theDestPitch*2));
-	}
-
-	if (create)
-		ToMortonTexture565(theTex, (u16*)theTex->data, (u16*)aDest, 0, 0, theDestPitch, theDestHeight);
-	else
-		ToMortonTexture565(theTex, (u16*)theTex->data, (u16*)aDest, offx, offy, theDestPitch, theDestHeight);
-
-	delete[] aDest;
-}
-
-static void CopyImageToTexturePalette8(C3D_Tex *theTex, MemoryImage *theImage, int offx, int offy, int theWidth, int theHeight, int theDestPitch, int theDestHeight, bool rightPad, bool bottomPad, bool create)
-{
-	printf("PALETTE %d %d - %d %d - %d %d\n", offx, offy, theWidth, theHeight, theDestPitch, theDestHeight);
-	fflush(stdout);
-
-	uint32_t *aDest = new uint32_t[theDestPitch * theDestHeight];
-
-	uint8_t *srcRow = (uint8_t*)theImage->mColorIndices + offy * theImage->GetWidth() + offx;
-	uint32_t *dstRow = aDest;
-	uint16_t *palette = (uint16_t*)theImage->mColorTable;
-
-	for(int y=0; y<theHeight; y++)
-	{
-		uint8_t *src = srcRow;
-		uint32_t *dst = dstRow;
-		for(int x=0; x<theWidth; x++)
-		{
-			uint32_t aPixel = palette[*src++];
-			*dst++ = (aPixel&0xFF00FF00) | ((aPixel>>16)&0xFF) | ((aPixel<<16)&0xFF0000);
-		}
-
-		if (rightPad) 
-			*dst = *(dst-1);
-
-		srcRow += theImage->GetWidth();
-		dstRow += theDestPitch;
-	}
-
-	if (bottomPad)
-	{
-		uint32_t *dstrow = aDest + (theDestPitch*theHeight);
-		memcpy(dstrow, dstrow-(theDestPitch*4), (theDestPitch*4));
-	}
-
-	if (create)
-		ToMortonTexture32(theTex, (u32*)theTex->data, (u32*)aDest, 0, 0, theDestPitch, theDestHeight);
-	else
-		ToMortonTexture32(theTex, (u32*)theTex->data, (u32*)aDest, offx, offy, theDestPitch, theDestHeight);
-
-	delete[] aDest;
+	u32 dstY = theTex->height - 1 - y;
+	return (CalcZOrder(x & 0x07) | (CalcZOrder(dstY & 0x07) << 1)) + ((x & ~0x07) * 8) + ((dstY & ~0x07) * theTex->width);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
-static void CopyImageToTexture(C3D_Tex *theTex, MemoryImage *theImage, int offx, int offy, int texWidth, int texHeight, PixelFormat theFormat, bool create)
+// Fills one texture piece in the tiled layout straight from the image, with
+// no staging buffer. The piece covers texWidth x texHeight image pixels at
+// (offx, offy); theTex may be smaller than that (CTR_TEXTURE_SHRINK_SHIFT),
+// in which case each texel is the alpha-weighted average of its source block,
+// the PS2 downscale (Ps2GsTextureDownscale). UVs are fractions of the piece,
+// so drawing code and game layout never see the reduced size. Texels past the
+// image edge repeat its last row/column.
+static bool CopyImageToTexture(C3D_Tex *theTex, MemoryImage *theImage, int offx, int offy, int texWidth, int texHeight, PixelFormat theFormat)
 {
 	GPU_TEXTURE_FILTER_PARAM filter = (gLinearFilter) ? GPU_LINEAR : GPU_NEAREST;
 	C3D_TexSetFilter(theTex, filter, filter);
@@ -519,21 +241,78 @@ static void CopyImageToTexture(C3D_Tex *theTex, MemoryImage *theImage, int offx,
 
 	int aWidth = std::min(texWidth,(theImage->GetWidth()-offx));
 	int aHeight = std::min(texHeight,(theImage->GetHeight()-offy));
+	if (aWidth <= 0 || aHeight <= 0)
+		return true;
 
-	bool rightPad = aWidth<texWidth;
-	bool bottomPad = aHeight<texHeight;
-
-	if(aWidth>0 && aHeight>0)
+	// Palette images are read through their table: GetBits() would expand
+	// them to a resident 32bpp copy.
+	uint32_t *aBits = NULL;
+	uint8_t *anIndices = (uint8_t*)theImage->mColorIndices;
+	uint32_t *aPalette = (uint32_t*)theImage->mColorTable;
+	if (aPalette == NULL)
 	{
-		switch (theFormat)
+		aBits = theImage->GetBits();
+		if (aBits == NULL)
+			return false;
+	}
+	else if (anIndices == NULL)
+		return false;
+
+	const int aPitch = theImage->GetWidth();
+	const int aBlockWidth = texWidth / theTex->width;
+	const int aBlockHeight = texHeight / theTex->height;
+
+	for (int y = 0; y < theTex->height; y++)
+	{
+		for (int x = 0; x < theTex->width; x++)
 		{
-			case PixelFormat_A8R8G8B8:	CopyImageToTexture8888(theTex, theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create); break;
-			case PixelFormat_A4R4G4B4:	CopyImageToTexture4444(theTex, theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create); break;
-			case PixelFormat_R5G6B5:	CopyImageToTexture565(theTex, theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create); break;
-			case PixelFormat_Palette8:	CopyImageToTexturePalette8(theTex, theImage, offx, offy, aWidth, aHeight, texWidth, texHeight, rightPad, bottomPad, create); break;
-			case PixelFormat_Unknown: break;
+			uint32_t aFirst = 0;
+			uint32_t aSumA = 0, aSumR = 0, aSumG = 0, aSumB = 0;
+			int aSamples = 0;
+			for (int by = 0; by < aBlockHeight; by++)
+			{
+				int sy = offy + std::min(y * aBlockHeight + by, aHeight - 1);
+				for (int bx = 0; bx < aBlockWidth; bx++)
+				{
+					int sx = offx + std::min(x * aBlockWidth + bx, aWidth - 1);
+					int anIndex = sy * aPitch + sx;
+					uint32_t aSample = aBits ? aBits[anIndex] : aPalette[anIndices[anIndex]];
+					uint32_t anAlpha = aSample >> 24;
+					if (aSamples++ == 0)
+						aFirst = aSample;
+					aSumA += anAlpha;
+					aSumR += ((aSample >> 16) & 0xFF) * anAlpha;
+					aSumG += ((aSample >> 8) & 0xFF) * anAlpha;
+					aSumB += (aSample & 0xFF) * anAlpha;
+				}
+			}
+
+			// Colour is weighted by alpha so transparent texels do not darken edges
+			uint32_t aPixel = aFirst;
+			if (aSamples > 1)
+			{
+				if (aSumA != 0)
+					aPixel = ((aSumA / aSamples) << 24) | ((aSumR / aSumA) << 16) | ((aSumG / aSumA) << 8) | (aSumB / aSumA);
+				else
+					aPixel = aFirst & 0x00FFFFFF;
+			}
+
+			u32 a = aPixel >> 24;
+			u32 r = (aPixel >> 16) & 0xFF;
+			u32 g = (aPixel >> 8) & 0xFF;
+			u32 b = aPixel & 0xFF;
+			u32 anOffset = GetTiledOffset(theTex, x, y);
+			switch (theFormat)
+			{
+				case PixelFormat_A8R8G8B8:	((u32*)theTex->data)[anOffset] = a | (b << 8) | (g << 16) | (r << 24); break;
+				case PixelFormat_A4R4G4B4:	((u16*)theTex->data)[anOffset] = ((r >> 4) << 12) | ((g >> 4) << 8) | ((b >> 4) << 4) | (a >> 4); break;
+				case PixelFormat_R5G6B5:	((u16*)theTex->data)[anOffset] = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3); break;
+				default: break;
+			}
 		}
 	}
+
+	return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -663,6 +442,7 @@ void TextureData::ReleaseTextures()
 
 	mTextures.clear();
 
+	gTotalTexMemSize -= mTexMemSize;
 	mTexMemSize = 0;
 
 	/*
@@ -828,11 +608,33 @@ void TextureData::CreateTextures(MemoryImage *theImage)
 			TextureDataPiece &aPiece = mTextures[i];
 			if (createTextures)
 			{
-				C3D_TexInit(&aPiece.mTexture, aPiece.mWidth, aPiece.mHeight, aFormatType);
-				mTexMemSize += aPiece.mWidth*aPiece.mHeight*aFormatSize;
+				int aTexWidth = std::max(gMinTextureWidth, aPiece.mWidth >> CTR_TEXTURE_SHRINK_SHIFT);
+				int aTexHeight = std::max(gMinTextureHeight, aPiece.mHeight >> CTR_TEXTURE_SHRINK_SHIFT);
+				if (!C3D_TexInit(&aPiece.mTexture, aTexWidth, aTexHeight, aFormatType))
+				{
+					// Linear heap exhausted: leave the image undrawn and retry on
+					// the next draw, as the PC/Wii backends do on GL_OUT_OF_MEMORY.
+					static int aNumReported = 0;
+					if (aNumReported < 8)
+					{
+						aNumReported++;
+						printf("[GFX] texture alloc failed: %dx%d (linear free %luK)\n",
+							aTexWidth, aTexHeight, (unsigned long)(linearSpaceFree() / 1024));
+					}
+					ReleaseTextures();
+					mPixelFormat = PixelFormat_Unknown;
+					return;
+				}
+				mTexMemSize += aTexWidth*aTexHeight*aFormatSize;
+				gTotalTexMemSize += aTexWidth*aTexHeight*aFormatSize;
 			}
 
-			CopyImageToTexture(&aPiece.mTexture, theImage,x,y,aPiece.mWidth,aPiece.mHeight,aFormat, createTextures);
+			if (!CopyImageToTexture(&aPiece.mTexture, theImage,x,y,aPiece.mWidth,aPiece.mHeight,aFormat))
+			{
+				ReleaseTextures();
+				mPixelFormat = PixelFormat_Unknown;
+				return;
+			}
 		}
 	}
 
@@ -1350,7 +1152,7 @@ GLInterface::~GLInterface()
 		anImage->mD3DData = NULL;
 	}
 
-	delete[] gVertices;
+	linearFree(gVertices);
 }
 
 void GLInterface::SetDrawMode(int theDrawMode)
@@ -1530,11 +1332,47 @@ bool GLInterface::PreDraw()
 	return true;
 }
 
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+// Once a second, rewrites the first two rows of the top-screen console with
+// the numbers the Old/New 3DS memory budgets are tuned from. Peaks and drops
+// are counted since the previous report.
+static void ReportMemoryStats()
+{
+	static u64 aLastReportTime = 0;
+	u64 aNow = osGetTime();
+	if (aNow - aLastReportTime < 1000)
+		return;
+	aLastReportTime = aNow;
+
+#ifdef PVZ_3DS_PROFILE_NEW3DS
+	const char* aProfile = "N3DS";
+#else
+	const char* aProfile = "O3DS";
+#endif
+	struct mallinfo aHeap = mallinfo();
+	printf("\x1b[s\x1b[1;1H\x1b[2K%s heap %luK/%luK linear free %luK"
+		"\x1b[2;1H\x1b[2Ktex %dK vtx %d/%d cmd %d%% drop %d\x1b[u",
+		aProfile,
+		(unsigned long)(aHeap.uordblks / 1024), (unsigned long)(envGetHeapSize() / 1024),
+		(unsigned long)(linearSpaceFree() / 1024),
+		gTotalTexMemSize / 1024, gPeakVertices, MAX_VERTICES,
+		(int)(gPeakCmdBufUsage * 100.0f), gDroppedDraws);
+	fflush(stdout);
+
+	gPeakVertices = 0;
+	gPeakCmdBufUsage = 0.0f;
+	gDroppedDraws = 0;
+}
+
 void GLInterface::Flush()
 {
 	C3D_FrameEnd(0);
+	gPeakVertices = std::max(gPeakVertices, gStartVertex);
+	gPeakCmdBufUsage = std::max(gPeakCmdBufUsage, C3D_GetCmdBufUsage());
 	gNumVertices = 0;
 	gStartVertex = 0;
+	ReportMemoryStats();
 
 	C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 	C3D_FrameDrawOn(bottomTarget);
@@ -1569,56 +1407,22 @@ bool GLInterface::CreateImageTexture(MemoryImage *theImage)
 	printf("total memory: %.2f MB, %.2f KB\n", total/1024.f/1024.f, total/1024.f);
 	*/
 
-	if (wantPurge)
+	const bool uploadSucceeded = aData->mPixelFormat != PixelFormat_Unknown;
+	// Purging after a failed upload would make the failure permanent; keep the
+	// pixels so the next frame can retry (same rule as the PC/Wii backend).
+	if (uploadSucceeded && wantPurge)
 		theImage->PurgeBits();
 
-	return aData->mPixelFormat != PixelFormat_Unknown;
+	return uploadSucceeded;
 }
 
 bool GLInterface::RecoverBits(MemoryImage* theImage)
 {
-	if (theImage->mD3DData == NULL)
-		return false;
-
-	TextureData* aData = (TextureData*) theImage->mD3DData;
-	if (aData->mBitsChangedCount != theImage->mBitsChangedCount) // bits have changed since texture was created
-		return false;
-
-	printf("recover\n");
-	fflush(stdout);
-	for (int aPieceRow = 0; aPieceRow < aData->mTexVecHeight; aPieceRow++)
-	{
-		for (int aPieceCol = 0; aPieceCol < aData->mTexVecWidth; aPieceCol++)
-		{
-			TextureDataPiece* aPiece = &aData->mTextures[aPieceRow*aData->mTexVecWidth + aPieceCol];
-
-			int offx = aPieceCol*aData->mTexPieceWidth;
-			int offy = aPieceRow*aData->mTexPieceHeight;
-			int aWidth = std::min(theImage->mWidth-offx, aPiece->mWidth);
-			int aHeight = std::min(theImage->mHeight-offy, aPiece->mHeight);
-
-			//glEnable(GL_TEXTURE_2D);
-			//glActiveTexture(GL_TEXTURE0);
-			//glBindTexture(GL_TEXTURE_2D, aPiece->mTexture);
-
-			//glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, theImage->GetBits());
-
-			/*
-			switch (aData->mPixelFormat)
-			{
-			case PixelFormat_A8R8G8B8:	CopyTexture8888ToImage(aDesc.lpSurface, aDesc.lPitch, theImage, offx, offy, aWidth, aHeight); break;
-			case PixelFormat_A4R4G4B4:	CopyTexture4444ToImage(aDesc.lpSurface, aDesc.lPitch, theImage, offx, offy, aWidth, aHeight); break;
-			case PixelFormat_R5G6B5: CopyTexture565ToImage(aDesc.lpSurface, aDesc.lPitch, theImage, offx, offy, aWidth, aHeight); break;
-			case PixelFormat_Palette8:	CopyTexturePalette8ToImage(aDesc.lpSurface, aDesc.lPitch, theImage, offx, offy, aWidth, aHeight, aData->mPalette); break;
-			case PixelFormat_Unknown: break;
-			}
-
-			D3DInterface::CheckDXError(aPiece->mTexture->Unlock(NULL),"Texture Unlock");
-			*/
-		}
-	}
-
-	return true;
+	// Same answer as the Wii backend: there is no texture read-back (the data
+	// is tiled and may be shrunk or 16-bit), so GetBits() falls back to a blank
+	// buffer instead of returning uninitialized memory as "recovered".
+	(void)theImage;
+	return false;
 }
 
 void GLInterface::PushTransform(const SexyMatrix3 &theTransform, bool concatenate)
