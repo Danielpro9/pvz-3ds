@@ -343,7 +343,7 @@ enum EffectType
     EFFECT_ATTACHMENT = 3,
     EFFECT_OTHER = 4
 };
-enum EmitterType
+enum EmitterType : int
 {
     EMITTER_CIRCLE = 0,
     EMITTER_BOX = 1,
@@ -1137,7 +1137,7 @@ enum StorePages : int
     STORE_PAGE_ZEN2 = 3,
     NUM_STORE_PAGES = 4
 };
-enum TodCurves
+enum TodCurves : int
 {
     CURVE_CONSTANT,             // 常函数曲线
     CURVE_LINEAR,               // 线性曲线

@@ -42,7 +42,7 @@ enum ParticleFlags
     PARTICLE_HARDWARE_ONLY              // 仅硬件渲染，指定粒子仅在已开启 3D 加速时可被渲染
 };
 
-enum ParticleFieldType
+enum ParticleFieldType : int
 {
     FIELD_INVALID,
     FIELD_FRICTION,                     // 摩擦力场：该场内粒子的速度按一定比例不断衰减

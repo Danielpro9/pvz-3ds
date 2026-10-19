@@ -45,13 +45,21 @@ private:
     char* mData;
 };
 
-bool DefinitionCheckedAllocationSize(int theCount, int theItemSize, int& theSize)
+// Compiled files hold the 32-bit PC layout. ARM EABI packs plain enums into
+// fewer bytes, so enums stored in definitions need an explicit int type.
+static_assert(sizeof(FloatParameterTrackNode) == 20,
+    "FloatParameterTrackNode must match the compiled file layout");
+
+// Counts come from the stream: a desynced stream must fail here, before
+// DefinitionAlloc, instead of requesting a garbage-sized block.
+bool DefinitionCheckedAllocationSize(const DefinitionStreamReader& theReader,
+    int theCount, int theItemSize, int& theSize)
 {
     if (theCount < 0 || theItemSize <= 0 || theCount > INT_MAX / theItemSize)
         return false;
 
     theSize = theCount * theItemSize;
-    return true;
+    return (size_t)theSize <= theReader.Size() - theReader.Position();
 }
 
 bool DefinitionReadMap(DefinitionStreamReader& theReader,
@@ -71,7 +79,7 @@ bool DefinitionReadArray(DefinitionStreamReader& theReader,
         return true;
 
     int aArraySize;
-    if (!DefinitionCheckedAllocationSize(theArray->mArrayCount,
+    if (!DefinitionCheckedAllocationSize(theReader, theArray->mArrayCount,
         aDefSize, aArraySize))
     {
         return false;
@@ -101,7 +109,7 @@ bool DefinitionReadFloatTrack(DefinitionStreamReader& theReader,
         return aCountNodes == 0;
 
     int aSize;
-    if (!DefinitionCheckedAllocationSize(aCountNodes,
+    if (!DefinitionCheckedAllocationSize(theReader, aCountNodes,
         sizeof(FloatParameterTrackNode), aSize))
     {
         return false;
