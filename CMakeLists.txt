@@ -301,6 +301,11 @@ if (NINTENDO_3DS)
 		CTR_TEXTURE_SHRINK_SHIFT=${CTR_TEXTURE_SHRINK_SHIFT}
 	)
 	target_compile_options(re-plants-vs-zombies PRIVATE -include SDL.h)
+	# The 3DS toolchain only adds libctru's headers by default; the portlibs
+	# found above live in $DEVKITPRO/portlibs/3ds/include.
+	target_include_directories(re-plants-vs-zombies PRIVATE
+		${ZLIB_INCLUDE_DIRS} ${PNG_INCLUDE_DIRS} ${JPEG_INCLUDE_DIRS}
+	)
 endif()
 
 if (LOW_MEMORY)
