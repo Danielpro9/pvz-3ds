@@ -175,16 +175,20 @@ elseif(NINTENDO_3DS)
 	# Textures are stored at 1/2^shift resolution, invisible to game layout
 	# (same idea as PS2_GS_TEXTURE_SHRINK_SHIFT). Old 3DS halves them like PS2,
 	# New 3DS keeps the full resolution like Wii.
-	# Linear heap: the GPU-visible part of app memory (textures, vertex and
-	# command buffers, framebuffers); libctru gives the rest to the regular heap.
-	# Its default of up to 32 MB left ~27 MB of it unused on the first New 3DS
-	# run while the regular heap ran out. Read "linear free" on the top screen.
+	# Regular heap size; libctru gives the rest of app memory to the linear
+	# (GPU-visible) heap. 0 keeps libctru's own split, which on New 3DS is
+	# already ~89 MB heap / 32 MB linear: the heap cannot grow past its 96 MB
+	# address range (a 24 MB linear heap pushed it to 96.8 MB and libctru
+	# panicked at boot). Old 3DS would get only ~26 MB of heap from that split
+	# and a 32 MB linear heap it does not need, so its heap is fixed instead;
+	# fixed, it also fits a New 3DS, where the Old 3DS build then sees the
+	# same heap budget. Read "heap" and "linear free" on the top screen.
 	if(PVZ_3DS_PROFILE STREQUAL "NEW3DS")
 		set(CTR_TEXTURE_SHRINK_SHIFT 0)
-		set(CTR_LINEAR_HEAP_MB 24)
+		set(CTR_HEAP_MB 0)
 	else()
 		set(CTR_TEXTURE_SHRINK_SHIFT 1)
-		set(CTR_LINEAR_HEAP_MB 12)
+		set(CTR_HEAP_MB 44)
 	endif()
 
 	set(NO_GLEW ON)
@@ -306,7 +310,7 @@ if (NINTENDO_3DS)
 	target_compile_definitions(re-plants-vs-zombies PRIVATE
 		PVZ_3DS_PROFILE_${PVZ_3DS_PROFILE}
 		CTR_TEXTURE_SHRINK_SHIFT=${CTR_TEXTURE_SHRINK_SHIFT}
-		CTR_LINEAR_HEAP_MB=${CTR_LINEAR_HEAP_MB}
+		CTR_HEAP_MB=${CTR_HEAP_MB}
 	)
 	target_compile_options(re-plants-vs-zombies PRIVATE -include SDL.h)
 	# The 3DS toolchain only adds libctru's headers by default; the portlibs

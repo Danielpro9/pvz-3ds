@@ -10,9 +10,11 @@ using namespace Sexy;
 #include "CtrLog.h"
 extern "C" {
 	unsigned int __stacksize__ = 512 * 1024;
-	// Read by libctru at startup; the regular heap gets the remaining memory.
+#if CTR_HEAP_MB > 0
+	// Read by libctru before main(); the linear heap gets the remaining memory.
 	// Sized per profile in CMakeLists.txt.
-	u32 __ctru_linear_heap_size = CTR_LINEAR_HEAP_MB << 20;
+	u32 __ctru_heap_size = CTR_HEAP_MB << 20;
+#endif
 }
 #endif
 

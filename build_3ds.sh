@@ -42,5 +42,11 @@ fi
 	-DPVZ_3DS_PROFILE=$(echo "$PROFILE" | tr a-z A-Z)
 cmake --build "$BUILD_DIR" --parallel
 
+# Code + data + bss come out of the same app memory as the heaps, so this
+# decides how much is left for them (libctru splits what remains at boot).
+if [ -x "$DEVKITARM/bin/arm-none-eabi-size" ]; then
+	"$DEVKITARM/bin/arm-none-eabi-size" "$BUILD_DIR/pvz_$PROFILE.elf"
+fi
+
 echo
 echo "Done: $BUILD_DIR/pvz_$PROFILE.3dsx"
