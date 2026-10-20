@@ -1,10 +1,12 @@
 #include <3ds.h>
+#include <cstring>
 #include <unordered_map>
 
 #include "SexyAppBase.h"
 #include "graphics/GLInterface.h"
 #include "graphics/GLImage.h"
 #include "widget/WidgetManager.h"
+#include "misc/SexyLog.h"
 
 using namespace Sexy;
 
@@ -40,7 +42,14 @@ bool SexyAppBase::StartTextInput(std::string& theInput)
 	char aBuffer[64] = {};
 	SwkbdState aKeyboard;
 	swkbdInit(&aKeyboard, SWKBD_TYPE_NORMAL, 2, 12);
-	if (swkbdInputText(&aKeyboard, aBuffer, sizeof(aBuffer)) != SWKBD_BUTTON_CONFIRM)
+
+	SexyLogPrintf("[KBD] open\n");
+	mGLInterface->SuspendFrame();
+	SwkbdButton aButton = swkbdInputText(&aKeyboard, aBuffer, sizeof(aBuffer));
+	SexyLogPrintf("[KBD] closed: button %d, %d bytes\n", (int)aButton, (int)strlen(aBuffer));
+	mGLInterface->ResumeFrame();
+
+	if (aButton != SWKBD_BUTTON_CONFIRM)
 		return false;
 
 	theInput = aBuffer;
@@ -54,11 +63,20 @@ void SexyAppBase::StopTextInput()
 
 bool SexyAppBase::ProcessDeferredMessages(bool singleMessage)
 {
+	// A HOME or power button press makes aptMainLoop jump to the HOME menu,
+	// which takes the GPU over like swkbd does (see StartTextInput).
+	bool aJumpToHome = mGLInterface != NULL && aptShouldJumpToHome();
+	if (aJumpToHome)
+		mGLInterface->SuspendFrame();
+
 	if (!aptMainLoop())
 	{
 		mShutdown = true;
 		return false;
 	}
+
+	if (aJumpToHome)
+		mGLInterface->ResumeFrame();
 
 	hidScanInput();
 	u32 aKeysDown = hidKeysDown();

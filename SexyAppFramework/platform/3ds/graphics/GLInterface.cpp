@@ -63,6 +63,8 @@ static int gTotalTexMemSize;
 static int gPeakVertices;
 static float gPeakCmdBufUsage;
 static int gDroppedDraws;
+// Frames logged to log.txt after an applet returns (see ResumeFrame).
+static int gTraceFrames;
 
 static void GfxBegin(int vertexMode)
 {
@@ -1387,7 +1389,7 @@ static void ReportMemoryStats()
 	gDroppedDraws = 0;
 }
 
-void GLInterface::Flush()
+static void GfxFrameEnd()
 {
 	C3D_FrameEnd(0);
 	gPeakVertices = std::max(gPeakVertices, gStartVertex);
@@ -1395,9 +1397,37 @@ void GLInterface::Flush()
 	gNumVertices = 0;
 	gStartVertex = 0;
 	ReportMemoryStats();
+}
 
+static void GfxFrameBegin()
+{
 	C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 	C3D_FrameDrawOn(bottomTarget);
+}
+
+void GLInterface::Flush()
+{
+	GfxFrameEnd();
+	if (gTraceFrames > 0)
+		SexyLogPrintf("[GFX] frame submitted\n");
+
+	GfxFrameBegin();
+	if (gTraceFrames > 0)
+		SexyLogPrintf("[GFX] frame started (%d left to trace)\n", --gTraceFrames);
+}
+
+// swkbd and the HOME menu take the GPU over while they run, and libctru expects
+// them (like aptMainLoop) between frames: close the open frame before one
+// starts and open a new one once it returns.
+void GLInterface::SuspendFrame()
+{
+	GfxFrameEnd();
+}
+
+void GLInterface::ResumeFrame()
+{
+	GfxFrameBegin();
+	gTraceFrames = 3;
 }
 
 bool GLInterface::CreateImageTexture(MemoryImage *theImage)

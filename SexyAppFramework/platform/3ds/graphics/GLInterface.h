@@ -214,6 +214,8 @@ public:
 
 	bool					PreDraw();
 	void					Flush();
+	void					SuspendFrame();
+	void					ResumeFrame();
 
 	bool					CreateImageTexture(MemoryImage* theImage);
 	bool					RecoverBits(MemoryImage* theImage);
